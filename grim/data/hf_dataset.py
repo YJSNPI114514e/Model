@@ -63,7 +63,7 @@ def _iter_rows(ds: Any, max_samples: int | None) -> Iterator[dict]:
 
 
 def load_hf_text(
-    dataset: str,
+    dataset: str = "fn-aka-mur/wiki40b_ja",
     *,
     split: str = "train",
     text_column: str | None = None,
@@ -78,7 +78,8 @@ def load_hf_text(
     **kwargs: Any,
 ) -> tuple[str, str]:
     """
-    load_dataset("fn-aka-mur/wiki40b_ja") 相当をテキスト1本に連結。
+    Hugging Face Datasets をテキスト1本に連結。
+    デフォルトは Wiki40b 日本語データセット (fn-aka-mur/wiki40b_ja) を使用します。
 
     Returns:
         (text, column_name)
@@ -158,7 +159,7 @@ def load_hf_text(
     return text, col
 
 def load_hf_corpus(
-    dataset: str,
+    dataset: str = "fn-aka-mur/wiki40b_ja",
     *,
     split: str = "train",
     text_column: str | None = None,
