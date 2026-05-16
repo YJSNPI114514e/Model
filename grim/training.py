@@ -1,4 +1,4 @@
-"""訓練ループ（第4.1節 Algorithm）。"""
+"""訓練ループ（sekkeisyo.txt CORRECT TRAINING LOOP 準拠）。"""
 
 from __future__ import annotations
 
@@ -67,10 +67,27 @@ def evaluate(model: GRIM, loader: DataLoader, device: torch.device) -> float:
     return evaluate_classify(model, loader, device)
 
 
+def _collect_k2_params(model: GRIM) -> list[torch.nn.Parameter]:
+    """
+    sekkeisyo PARAMETER GROUPS:
+    K2_PARAMETERS — meta.* を除く全パラメータ
+    """
+    return [p for n, p in model.named_parameters() if not n.startswith("meta.")]
+
+
+def _collect_k3_params(model: GRIM) -> list[torch.nn.Parameter]:
+    """
+    sekkeisyo PARAMETER GROUPS:
+    K3_PARAMETERS — meta.* のみ
+    """
+    return [p for n, p in model.named_parameters() if n.startswith("meta.")]
+
+
 def train_epoch(
     model: GRIM,
     loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
+    k2_optimizer: torch.optim.Optimizer,
+    k3_optimizer: torch.optim.Optimizer,
     device: torch.device,
     config: GRIMConfig,
     kfac: KFACNaturalGradient | None,
@@ -81,6 +98,9 @@ def train_epoch(
     total_loss = 0.0
     n_batches = 0
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    # sekkeisyo: K2 params only for gradient clipping
+    k2_params = _collect_k2_params(model)
 
     for batch in tqdm(loader, desc="train", leave=False):
         if len(batch) == 3:
@@ -94,44 +114,61 @@ def train_epoch(
             mask = mask.to(device, non_blocking=True)
 
         do_meta = (global_step + 1) % config.k3_interval == 0
-        optimizer.zero_grad(set_to_none=True)
+
+        # --- K=2: NATURAL GRADIENT UPDATE ---
+        # sekkeisyo: K2_optimizer updates K2 params only
+        k2_optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
             out = model.forward_train_batch(x, y, mask)
             loss = out["loss"]
         if not torch.isfinite(loss):
+            global_step += 1
             continue
+
         if use_amp:
             scaler.scale(loss).backward(retain_graph=do_meta)
         else:
             loss.backward(retain_graph=do_meta)
 
+        # sekkeisyo: KFAC preconditions K2 params ONLY (not meta)
         if kfac is not None and config.use_natural_grad:
-            kfac.precondition(model.parameters())
+            kfac.precondition(iter(k2_params))
 
         if use_amp:
-            scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            scaler.unscale_(k2_optimizer)
+        # sekkeisyo: clip K2 params only
+        torch.nn.utils.clip_grad_norm_(k2_params, config.grad_clip)
         if use_amp:
-            scaler.step(optimizer)
+            scaler.step(k2_optimizer)
             scaler.update()
         else:
-            optimizer.step()
+            k2_optimizer.step()
+
         if model.config.task_mode == "classify":
             model.reorthogonalize_obs()
 
-        if do_meta:
-            for p in model.meta.parameters():
-                if p.grad is not None:
-                    p.grad.zero_()
-            meta_loss = model.meta.kl_to_history()
-            meta_loss.backward()
-            model.meta.apply_natural_grad_step(config.meta_lr)
-            model.meta.momentum_update()
-
+        # --- HISTORY UPDATE ---
+        # sekkeisyo: history_buffer.push(psi_T.detach())
+        #            then decay all weights
         with torch.no_grad():
-            for psi in out["psi_T"]:
-                model.history.decay()
-                model.history.push(psi)
+            psi_T = out["psi_T"].detach()
+            # Push batch mean state (or first element for single-sample)
+            if psi_T.dim() == 2 and psi_T.shape[0] > 0:
+                model.history.push(psi_T[0])
+            model.history.decay()
+
+        # --- K=3: META UPDATE (every k3_interval steps) ---
+        # sekkeisyo: meta_loss = mean(L_obs) + beta * KL(meta_weights || historical)
+        if do_meta:
+            k3_optimizer.zero_grad(set_to_none=True)
+            meta_loss = model.meta.compute_meta_loss(out["loss_obs"].detach().clone().requires_grad_(False))
+            # Need to recompute with grad for meta params
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                meta_out = model.forward_train_batch(x, y, mask)
+            meta_total = model.meta.compute_meta_loss(meta_out["loss_obs"])
+            meta_total.backward()
+            k3_optimizer.step()
+            model.meta.momentum_update()
 
         global_step += 1
         total_loss += loss.item()
@@ -160,7 +197,15 @@ def train(
     if use_amp and not device.type == "cuda":
         use_amp = False
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    # sekkeisyo VIOLATION 2: Split into K2 and K3 optimizers
+    k2_params = _collect_k2_params(model)
+    k3_params = _collect_k3_params(model)
+
+    # sekkeisyo: K2 uses Natural Gradient (KFAC approximation)
+    k2_optimizer = torch.optim.Adam(k2_params, lr=config.lr)
+    # sekkeisyo: K3 uses separate Meta Gradient optimizer
+    k3_optimizer = torch.optim.Adam(k3_params, lr=config.meta_lr)
+
     kfac = None
     if config.use_natural_grad:
         kfac = KFACNaturalGradient(model, damping=config.kfac_damping)
@@ -173,13 +218,16 @@ def train(
 
     for epoch in range(1, config.epochs + 1):
         avg_loss, global_step = train_epoch(
-            model, train_loader, optimizer, device, config, kfac, global_step, use_amp=use_amp
+            model, train_loader, k2_optimizer, k3_optimizer,
+            device, config, kfac, global_step, use_amp=use_amp,
         )
         if config.task_mode == "lm":
             acc, ppl = evaluate_lm(model, val_loader, device)
+            meta_w = model.meta.as_dict()
             print(
                 f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  "
-                f"val_token_acc={acc:.4f}  val_ppl~{ppl:.2f}"
+                f"val_token_acc={acc:.4f}  val_ppl~{ppl:.2f}  "
+                f"fm_w={meta_w['fm_weight']:.3f}  obs_w={meta_w['obs_weight']:.3f}"
             )
             metric = acc
         else:

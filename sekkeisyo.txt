@@ -1,0 +1,172 @@
+[GRIM MODEL CORRECTION PROMPT - CRITICAL FIXES REQUIRED]
+
+YOU ARE IMPLEMENTING GRIM (Gravitational Reasoning with Internal Memory). THIS IS NOT A TRANSFORMER. THIS IS NOT A STANDARD NEURAL NETWORK. YOU MUST FOLLOW THE DESIGN SPEC EXACTLY. DO NOT DEFAULT TO FAMILIAR PATTERNS.
+
+=== CRITICAL VIOLATIONS IN CURRENT CODE ===
+
+VIOLATION 1: Transformer pattern detected. You used sequential token processing (for-loop over tokens) or attention mechanisms. THIS IS FORBIDDEN.
+FIX: All tokens are encoded into a SINGLE complex state vector |ψ⟩ ∈ C^D in ONE operation. No per-token loops. No QKV attention.
+
+VIOLATION 2: All parameters passed to a single Adam optimizer. This breaks the nested time-scale structure (K=2 vs K=3).
+FIX: Split parameters into two groups:
+- Group K2: token_embeddings, flow_field network weights, observation basis, phase_weight, attention_weight, output_projection
+- Group K3: meta_fm_weight, meta_obs_weight, meta_lambda, meta_mu, meta_sigma, meta_beta
+K2 uses Natural Gradient (KFAC approximation). K3 uses separate Meta Gradient optimizer. K3 updates every 100 steps, NOT every step.
+
+VIOLATION 3: Meta weights (fm_weight, obs_weight) becoming negative. This inverts the loss function and causes divergence to -inf.
+FIX: Apply F.softplus() to ALL meta weights before using them in loss computation. NEVER allow raw negative values.
+
+VIOLATION 4: Softmax used for output probabilities. This violates Born Rule.
+FIX: Output probabilities MUST be computed as p(k) = |⟨o_k|ψ_T⟩|² . This is squared absolute value of complex inner product, NOT softmax.
+
+VIOLATION 5: Missing tangent space projection. Unitarity is broken.
+FIX: After computing raw vector field v_raw from flow_field network, ALWAYS apply: v = v_raw - ⟨ψ|v_raw⟩·ψ . This projects onto tangent space and guarantees norm preservation.
+
+VIOLATION 6: ODE solver may be using fixed-step methods.
+FIX: Use DOPRI5 (Dormand-Prince 5(4)) adaptive step size. Import from torchdiffeq or write explicit DOPRI5 solver. rtol=1e-4, atol=1e-6.
+
+=== CORRECT ARCHITECTURE ===
+
+COMPONENT 1: Tokenizer (ONE operation, not sequential)
+Input: token_ids [B, L], positions [B, L]
+1. e = token_embeddings[token_ids]  # [B, L, D] complex
+2. alpha = softmax(attention_weight @ e.real.transpose(-1,-2), dim=-1)  # [B, L]
+3. phi = phase_weight * positions  # [B, L]
+4. psi_0 = sum(alpha[...,None] * exp(1j*phi[...,None]) * e, dim=1)  # [B, D]
+5. psi_0 = psi_0 / norm(psi_0, dim=-1, keepdim=True)
+Return: psi_0 [B, D] complex, norm=1
+
+COMPONENT 2: Gravitational Field (vector field network)
+Input: t [B,1], psi [B,D], psi_0 [B,D], H_emb [B,D_h]
+1. t_emb = sinusoidal_embedding(t, D)
+2. concat = cat([psi.real, psi.imag, psi_0.real, psi_0.imag, H_emb, t_emb], dim=-1)
+3. raw = ComplexMLP(concat)  # outputs [B, D] complex
+4. v = tangent_project(raw, psi)  # FORCE tangent space
+Return: v [B,D] complex, satisfies ⟨ψ|v⟩=0
+
+COMPONENT 3: ODE Integration
+Function: integrate_flow(psi_0, H_emb)
+1. def rhs(t, psi): return self.gravitational_field(t, psi, psi_0, H_emb)
+2. t_span = [0.0, 1.0]
+3. psi_T = odeint(rhs, psi_0, t_span, method='dopri5', rtol=1e-4, atol=1e-6)[-1]
+4. ASSERT torch.allclose(norm(psi_T), 1.0, atol=1e-5)  # unitarity check
+Return: psi_T
+
+COMPONENT 4: Observation (Born Rule, NOT softmax)
+Classification:
+1. overlaps = obs_basis @ psi_T.conj().T  # [K, B] complex
+2. probs = abs(overlaps)**2  # [K, B] real, positive, sums to ~1
+3. Return: probs
+
+Generation (next token prediction):
+1. e_out = W_proj @ psi_T  # [B, D] complex
+2. scores = abs(token_embeddings @ e_out.conj().T)**2  # [B, V]
+3. probs = scores / scores.sum(dim=-1, keepdim=True)
+4. Return: probs
+
+COMPONENT 5: History Buffer (NOT nn.Parameter)
+Structure: Circular queue of (state, weight) pairs.
+- push(state): append with weight=1.0
+- after each step: for all entries, weight *= gamma (decay)
+- if len > N_max: remove oldest
+- summarize(): weighted sum of history_embedding(state) for all entries
+- history_embedding: small ComplexLinear projecting D→D_h
+
+=== CORRECT TRAINING LOOP ===
+
+FOR each batch (x, y):
+  
+  # --- K=1: INFERENCE ---
+  psi_0 = tokenize(x.tokens, x.positions)
+  H_emb = history_buffer.summarize()
+  psi_T = integrate_flow(psi_0, H_emb)
+  probs = observe(psi_T)  # Born Rule
+  
+  # --- LOSS COMPUTATION ---
+  # Step A: Conditional flow for Flow Matching
+  t ~ Uniform(0,1)
+  theta = arccos(|⟨psi_0|o_y⟩|)  # FS angle
+  psi_t = sin((1-t)*theta)/sin(theta) * psi_0 + sin(t*theta)/sin(theta) * o_y
+  psi_t = normalize(psi_t)
+  
+  # Step B: Target vector field
+  v_target = -theta*cos((1-t)*theta)/sin(theta) * psi_0 + theta*cos(t*theta)/sin(theta) * o_y
+  v_target = tangent_project(v_target, psi_t)
+  
+  # Step C: Predicted vector field
+  v_pred = gravitational_field(t, psi_t, psi_0, H_emb)
+  
+  # Step D: Losses
+  L_fm = mean(|v_pred - v_target|²)  # Flow Matching loss
+  L_obs = -mean(log(probs[range(B), y] + 1e-8))  # Observation loss
+  
+  # Step E: Apply meta weights with softplus (CRITICAL)
+  fm_w = softplus(meta_fm_weight)  # MUST be positive
+  obs_w = softplus(meta_obs_weight)  # MUST be positive
+  loss_K2 = fm_w * L_fm + obs_w * L_obs
+  
+  # --- K=2: NATURAL GRADIENT UPDATE ---
+  # Compute Fisher Information Matrix via KFAC
+  # Update K2 parameters with natural gradient
+  K2_optimizer.zero_grad()
+  loss_K2.backward(retain_graph=True)
+  # Apply KFAC preconditioning
+  K2_optimizer.step()
+  
+  # --- HISTORY UPDATE ---
+  history_buffer.push(psi_T.detach())
+  for entry in history_buffer: entry.weight *= gamma
+  if len(history_buffer) > N_max: history_buffer.pop_oldest()
+  
+  # --- K=3: META UPDATE (every 100 steps) ---
+  IF step % 100 == 0:
+    meta_loss = mean(L_obs) + beta * KL(meta_weights || historical_meta_weights)
+    K3_optimizer.zero_grad()
+    meta_loss.backward()
+    K3_optimizer.step()
+    # Update historical meta weights with EMA
+
+=== PARAMETER GROUPS ===
+
+K2_PARAMETERS (updated by Natural Gradient every step):
+- token_embeddings (V × D complex)
+- attention_weight (learnable linear)
+- phase_weight (scalar)
+- gravitational_field network (ComplexMLP weights)
+- obs_basis (K × D complex, for classification)
+- W_proj (D × D complex, for generation)
+- history_embedding (ComplexLinear D→D_h)
+
+K3_PARAMETERS (updated by Meta Gradient every 100 steps):
+- meta_fm_weight (scalar, initialized to give softplus ≈ 0.5)
+- meta_obs_weight (scalar, initialized to give softplus ≈ 1.0)
+- meta_lambda (scalar, initialized to give softplus ≈ 0.01)
+- meta_mu (scalar, initialized to give softplus ≈ 0.001)
+- meta_sigma (scalar, initialized to give softplus ≈ 0.1)
+- meta_beta (scalar, initialized to give softplus ≈ 0.1)
+
+NOT_PARAMETERS (never optimized):
+- history_buffer (circular queue, NOT nn.Parameter)
+
+=== FORBIDDEN PATTERNS (COMPILE-TIME CHECKS) ===
+
+DO NOT USE:
+- nn.MultiheadAttention or nn.Transformer
+- F.softmax for output probabilities (use Born Rule: |⟨o|ψ⟩|²)
+- Single Adam optimizer for all parameters
+- Raw meta weights without softplus
+- Fixed-step Euler ODE solver
+- For-loop over sequence length in tokenizer
+- Gradient flow from K2 loss into meta weights
+- history_buffer as nn.Parameter or nn.Module
+
+=== VERIFICATION AFTER FIX ===
+
+After implementing corrections, verify:
+1. norm(psi) == 1.0 throughout ODE integration
+2. meta weights always positive (check: softplus(meta_*) > 0)
+3. K2 and K3 optimizers have disjoint parameter sets
+4. No Transformer modules in model
+5. Output probs sum to ~1.0 via |⟨o|ψ⟩|² not softmax
+6. L_fm and L_obs are positive values
+7. Total loss decreases monotonically without diverging to -inf

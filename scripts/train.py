@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     p.add_argument("--no-natural-grad", action="store_true")
-    p.add_argument("--fast", action="store_true", help="小型モデル + Euler ODE（高速）")
+    p.add_argument("--fast", action="store_true", help="小型モデル（高速プリセット）")
     p.add_argument("--amp", action="store_true", help="GPU 混合精度（cuda 時のみ）")
     p.add_argument("--resume", action="store_true", help="既存のチェックポイントから再開")
     return p.parse_args()
@@ -216,7 +216,7 @@ def _main(args: argparse.Namespace) -> None:
     src = args.dataset or corpus.source
     print(
         f"NLP/LM  source={src}  vocab={vocab.size}  seq_len={config.seq_len}  D={config.D}  "
-        f"ode={config.ode_solver}({config.euler_steps})  fast={args.fast}  amp={args.amp and use_cuda}"
+        f"ode={config.ode_solver}  natural_grad={config.use_natural_grad}  fast={args.fast}  amp={args.amp and use_cuda}"
     )
     payload_extra = {"dataset": args.dataset, "data": args.data, "corpus_source": corpus.source}
     from grim.training import train

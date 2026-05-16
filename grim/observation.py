@@ -1,4 +1,4 @@
-"""観測基底・ボルン則・生成射影（第2.6節）。"""
+"""観測基底・ボルン則・生成射影（sekkeisyo.txt COMPONENT 4 準拠）。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ from grim.geometry import complex_inner
 
 
 class ObservationBasis(nn.Module):
-    """O = {|o_1⟩, ..., |o_K⟩}  QR正規直交"""
+    """
+    O = {|o_1⟩, ..., |o_K⟩}  QR正規直交
+    
+    sekkeisyo COMPONENT 4 (Classification):
+    1. overlaps = obs_basis @ psi_T.conj().T  # [K, B] complex
+    2. probs = abs(overlaps)**2  # Born Rule
+    """
 
     def __init__(self, num_classes: int, dim: int) -> None:
         super().__init__()
@@ -32,6 +38,10 @@ class ObservationBasis(nn.Module):
             self.basis.copy_(self._orthonormalize(self.basis))
 
     def born_probs(self, psi: Tensor) -> Tensor:
+        """
+        sekkeisyo COMPONENT 4: p(k) = |⟨o_k|ψ_T⟩|²
+        NOT softmax. Born Rule only.
+        """
         overlaps = complex_inner(self.basis.unsqueeze(0), psi.unsqueeze(1), dim=-1)
         probs = torch.abs(overlaps) ** 2
         return probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -50,7 +60,12 @@ class ObservationBasis(nn.Module):
 
 
 class GenerationHead(nn.Module):
-    """|e_out⟩ = W_proj |ψ_T⟩"""
+    """
+    sekkeisyo COMPONENT 4 (Generation):
+    1. e_out = W_proj @ psi_T  # [B, D] complex
+    2. scores = abs(token_embeddings @ e_out.conj().T)**2  # [B, V]
+    3. probs = scores / scores.sum(dim=-1, keepdim=True)
+    """
 
     def __init__(self, dim: int, tokenizer: nn.Module) -> None:
         super().__init__()
@@ -67,34 +82,27 @@ class GenerationHead(nn.Module):
         return psi @ self.W_proj
 
     def token_scores(self, psi: Tensor) -> Tensor:
+        """
+        sekkeisyo COMPONENT 4:
+        scores = |⟨e_k|W_proj|ψ_T⟩|² — Born Rule, NOT softmax
+        """
         e_out = self.project(psi)
         emb = self.tokenizer.embeddings
         overlaps = complex_inner(emb.unsqueeze(0), e_out.unsqueeze(1), dim=-1)
         return torch.abs(overlaps) ** 2
 
-    def predict_token(self, psi: Tensor, forbid_ids: list[int] | None = None) -> Tensor:
-        logp = self._log_probs(psi, forbid_ids, None, 1.0)
-        return logp.argmax(dim=-1)
+    def born_probs(self, psi: Tensor) -> Tensor:
+        """Born Rule 正規化済み確率分布。"""
+        scores = self.token_scores(psi)
+        return scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)
 
-    def _log_probs(
-        self,
-        psi: Tensor,
-        forbid_ids: list[int] | None,
-        recent_ids: list[int] | None,
-        repetition_penalty: float,
-    ) -> Tensor:
-        scores = self.token_scores(psi).clamp_min(1e-8)
-        logp = torch.log(scores)
-        logp = logp - torch.logsumexp(logp, dim=-1, keepdim=True)
+    def predict_token(self, psi: Tensor, forbid_ids: list[int] | None = None) -> Tensor:
+        probs = self.born_probs(psi)
         if forbid_ids:
             for tid in forbid_ids:
-                if 0 <= tid < logp.shape[-1]:
-                    logp[:, tid] = -1e9
-        if recent_ids and repetition_penalty > 1.0:
-            for tid in set(recent_ids):
-                if 0 <= tid < logp.shape[-1]:
-                    logp[:, tid] -= torch.log(torch.tensor(repetition_penalty, device=logp.device))
-        return logp
+                if 0 <= tid < probs.shape[-1]:
+                    probs[:, tid] = 0.0
+        return probs.argmax(dim=-1)
 
     def sample_token(
         self,
@@ -105,11 +113,33 @@ class GenerationHead(nn.Module):
         recent_ids: list[int] | None = None,
         repetition_penalty: float = 1.0,
     ) -> Tensor:
-        logp = self._log_probs(psi, forbid_ids, recent_ids, repetition_penalty)
+        """Born Rule 確率からサンプリング。"""
+        probs = self.born_probs(psi)
+
+        # 禁止トークン
+        if forbid_ids:
+            for tid in forbid_ids:
+                if 0 <= tid < probs.shape[-1]:
+                    probs[:, tid] = 0.0
+
+        # 繰り返しペナルティ
+        if recent_ids and repetition_penalty > 1.0:
+            for tid in set(recent_ids):
+                if 0 <= tid < probs.shape[-1]:
+                    probs[:, tid] = probs[:, tid] / repetition_penalty
+
+        # Temperature scaling (Born Rule 確率に直接適用)
         if temperature > 0 and temperature != 1.0:
-            logp = logp / temperature
-        if top_k > 0 and top_k < logp.shape[-1]:
-            v, _ = torch.topk(logp, top_k, dim=-1)
-            logp = logp.masked_fill(logp < v[:, -1:], -1e9)
-        probs = torch.softmax(logp, dim=-1)
+            # log → scale → exp でtemperatureを適用
+            log_probs = torch.log(probs.clamp_min(1e-8))
+            log_probs = log_probs / temperature
+            probs = torch.exp(log_probs)
+
+        # Top-k フィルタリング
+        if top_k > 0 and top_k < probs.shape[-1]:
+            v, _ = torch.topk(probs, top_k, dim=-1)
+            probs = probs.masked_fill(probs < v[:, -1:], 0.0)
+
+        # 再正規化
+        probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)

@@ -1,4 +1,4 @@
-"""GRIM 統合モデル（第1節アーキテクチャ）。"""
+"""GRIM 統合モデル（sekkeisyo.txt 準拠）。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from grim.geometry import (
 from grim.history import HistoryBuffer, HistoryEmbedder
 from grim.meta import MetaParams
 from grim.observation import GenerationHead, ObservationBasis
-from grim.ode_solver import integrate_flow, integrate_flow_euler
+from grim.ode_solver import integrate_flow
 from grim.tokenizer import ComplexTokenizer
 
 
@@ -101,10 +101,16 @@ class GRIM(nn.Module):
         return self.flow_matching_loss(psi0, target, h_emb, t)
 
     def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Tensor:
-        """p(t) ∝ |⟨e_t|W_proj|ψ_T⟩|²（第2.6.3節 生成・ボルン則）"""
+        """
+        sekkeisyo VIOLATION 4 / COMPONENT 4 (Generation):
+        出力確率は Born Rule: p(k) = |⟨e_k|W_proj|ψ_T⟩|²
+        scores / scores.sum() で正規化。softmax は使わない。
+        """
         scores = self.generation.token_scores(psi_T)
-        log_probs = torch.log(scores.clamp_min(1e-8))
-        log_probs = log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True)
+        # Born Rule 正規化: scores / sum(scores)
+        probs = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        # NLL loss
+        log_probs = torch.log(probs.clamp_min(1e-8))
         return F.nll_loss(log_probs, target_token_ids)
 
     def observation_loss(self, psi_T: Tensor, labels: Tensor) -> Tensor:
@@ -112,23 +118,18 @@ class GRIM(nn.Module):
         return F.nll_loss(torch.log(probs.clamp_min(1e-8)), labels)
 
     def integrate(self, psi0: Tensor, h_emb: Tensor) -> Tensor:
-        if self.config.ode_solver == "euler":
-            return integrate_flow_euler(
-                self.flow_field, psi0, h_emb, steps=self.config.euler_steps
-            )
-        try:
-            return integrate_flow(
-                self.flow_field,
-                psi0,
-                h_emb,
-                method=self.config.ode_method,
-                rtol=self.config.ode_rtol,
-                atol=self.config.ode_atol,
-            )
-        except Exception:
-            return integrate_flow_euler(
-                self.flow_field, psi0, h_emb, steps=self.config.euler_steps
-            )
+        """
+        sekkeisyo COMPONENT 3 / VIOLATION 6:
+        DOPRI5 のみ使用。Euler フォールバック禁止。
+        """
+        return integrate_flow(
+            self.flow_field,
+            psi0,
+            h_emb,
+            method=self.config.ode_method,
+            rtol=self.config.ode_rtol,
+            atol=self.config.ode_atol,
+        )
 
     def forward_train(
         self,
@@ -146,8 +147,9 @@ class GRIM(nn.Module):
         psi_T = self.integrate(psi0, h_emb)
         L_obs = self.observation_loss(psi_T, labels)
 
+        # sekkeisyo: softplus(meta weights) * losses
         w = self.meta
-        L = w.fm_weight * L_fm + w.obs_weight * L_obs
+        L = F.softplus(w.fm_weight) * L_fm + F.softplus(w.obs_weight) * L_obs
 
         return {
             "loss": L,
@@ -173,8 +175,9 @@ class GRIM(nn.Module):
         psi_T = self.integrate(psi0, h_emb)
         L_lm = self.language_modeling_loss(psi_T, target_ids)
 
+        # sekkeisyo: softplus(meta weights) * losses
         w = self.meta
-        L = w.fm_weight * L_fm + w.obs_weight * L_lm
+        L = F.softplus(w.fm_weight) * L_fm + F.softplus(w.obs_weight) * L_lm
 
         return {
             "loss": L,

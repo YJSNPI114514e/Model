@@ -1,4 +1,4 @@
-"""ハイパーパラメータ（tekisuto.txt 第5節）。"""
+"""ハイパーパラメータ（sekkeisyo.txt 準拠）。"""
 
 from dataclasses import dataclass, field
 
@@ -21,25 +21,24 @@ class GRIMConfig:
     history_eps: float = 1e-4
     D_h: int = 128
 
-    # Flow Matching / ODE  ("euler" が速い, "dopri5" が高精度)
+    # Flow Matching / ODE — DOPRI5 必須 (sekkeisyo VIOLATION 6)
     flow_hidden: int = 256
     flow_layers: int = 3
-    ode_solver: str = "euler"
-    euler_steps: int = 8
+    ode_solver: str = "dopri5"          # MUST be dopri5, Euler is FORBIDDEN
     ode_method: str = "dopri5"
-    ode_rtol: float = 1e-5
-    ode_atol: float = 1e-7
+    ode_rtol: float = 1e-4              # sekkeisyo: rtol=1e-4
+    ode_atol: float = 1e-6              # sekkeisyo: atol=1e-6
 
     # 学習
     lr: float = 0.002
     meta_lr: float = 0.001
     alpha_fm: float = 0.5
     beta_kl: float = 0.01
-    k3_interval: int = 200
+    k3_interval: int = 100              # sekkeisyo: K3 updates every 100 steps
     batch_size: int = 32
     epochs: int = 10
     grad_clip: float = 1.0
-    use_natural_grad: bool = False
+    use_natural_grad: bool = True       # sekkeisyo: K2 uses Natural Gradient (KFAC)
     kfac_damping: float = 1e-3
 
     # 埋め込み重み
@@ -56,18 +55,18 @@ class GRIMConfig:
     device: str = "cpu"
 
     def apply_fast_preset(self) -> "GRIMConfig":
-        """速度優先: 小型モデル + Euler 積分 + 履歴短縮"""
+        """速度優先: 小型モデル + 短い履歴（ODE は常に DOPRI5）"""
         self.D = 128
         self.D_h = 64
         self.flow_hidden = 128
         self.flow_layers = 2
-        self.ode_solver = "euler"
-        self.euler_steps = 6
+        # sekkeisyo VIOLATION 6: Euler solver is FORBIDDEN
+        self.ode_solver = "dopri5"
         self.N_max = 24
         self.seq_len = 48
         self.M_max = 48
-        self.use_natural_grad = False
-        self.k3_interval = 10_000
+        self.use_natural_grad = True    # K2 always uses Natural Gradient
+        self.k3_interval = 100          # K3 updates every 100 steps
         self.lr = 0.002
         self.batch_size = 16
         return self
