@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from grim.geometry import tangent_project
+from grim.geometry import complex_inner, tangent_project
 
 
 class ComplexLinear(nn.Module):
@@ -45,72 +45,44 @@ def sinusoidal_embedding(t: Tensor, dim: int) -> Tensor:
     return emb
 
 
-class FlowVectorField(nn.Module):
+class EnergyVectorField(nn.Module):
     """
-    v_pred = Π_tangent(MLP(ψ.real, ψ.imag, ψ₀.real, ψ₀.imag, H_emb, t_emb))
-    
-    sekkeisyo COMPONENT 2:
-    - Input: real-valued concat [psi.real, psi.imag, psi0.real, psi0.imag, H_emb, t_emb]
-    - Output: complex [B, D], projected onto tangent space
+    E(psi) = -log|⟨psi|psi_0⟩|² + λ·‖psi‖² + μ·MLP(psi, h_emb)
+    v = dψ/dt = -∇E
     """
 
-    def __init__(self, dim: int, hidden: int, history_dim: int, n_layers: int = 3) -> None:
+    def __init__(self, dim: int, hidden: int, history_dim: int) -> None:
         super().__init__()
         self.dim = dim
-        self.history_dim = history_dim
-        # sekkeisyo: concat = [psi.real(D), psi.imag(D), psi0.real(D), psi0.imag(D), H_emb(D_h), t_emb(D)]
-        in_dim = dim * 4 + history_dim + dim
+        self.lam = nn.Parameter(torch.tensor(-2.0))  # softplus(-2) ≈ 0.126
+        self.mu = nn.Parameter(torch.tensor(-2.0))
+        
+        self.history_mlp = nn.Sequential(
+            nn.Linear(dim * 2 + history_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
 
-        layers: list[nn.Module] = [ComplexLinear(in_dim, hidden)]
-        for _ in range(n_layers - 2):
-            layers.append(ComplexLinear(hidden, hidden))
-        layers.append(ComplexLinear(hidden, dim))
-        self.net = nn.ModuleList(layers)
-
-    @staticmethod
-    def _c_relu(z: Tensor) -> Tensor:
-        return torch.complex(torch.relu(z.real), torch.relu(z.imag))
-
-    def _build_features(
-        self,
-        psi: Tensor,
-        psi0: Tensor,
-        h_emb: Tensor,
-        t: Tensor,
-    ) -> Tensor:
-        """
-        sekkeisyo COMPONENT 2:
-        concat = cat([psi.real, psi.imag, psi0.real, psi0.imag, H_emb, t_emb], dim=-1)
-        """
+    def energy(self, psi: Tensor, psi0: Tensor, h_emb: Tensor) -> Tensor:
+        # -log|⟨psi|psi_0⟩|²
+        overlap = complex_inner(psi, psi0, dim=-1)
+        overlap_sq = torch.abs(overlap)**2
+        e_base = -torch.log(overlap_sq.clamp_min(1e-8))
+        
+        # ‖psi‖²
+        e_norm = torch.sum(torch.abs(psi)**2, dim=-1)
+        
         B = psi.shape[0]
-        device = psi.device
-
-        if t.dim() == 0:
-            t = t.expand(B)
-        if t.dim() == 1:
-            t = t.unsqueeze(-1)
-
         if h_emb.shape[0] != B:
             h_emb = h_emb.expand(B, -1)
-        if h_emb.shape[-1] != self.history_dim:
-            if h_emb.shape[-1] < self.history_dim:
-                h_emb = torch.nn.functional.pad(h_emb, (0, self.history_dim - h_emb.shape[-1]))
-            else:
-                h_emb = h_emb[..., : self.history_dim]
-
-        # sekkeisyo: sinusoidal_embedding(t, D)
-        t_emb = sinusoidal_embedding(t.squeeze(-1), self.dim)
-
-        # All real-valued features
-        real_features = torch.cat([
-            psi.real, psi.imag,
-            psi0.real, psi0.imag,
-            h_emb,
-            t_emb,
-        ], dim=-1)
-
-        # Convert to complex for ComplexMLP input
-        return torch.complex(real_features, torch.zeros_like(real_features))
+            
+        feat = torch.cat([psi.real, psi.imag, h_emb], dim=-1)
+        e_hist = self.history_mlp(feat).squeeze(-1)
+        
+        import torch.nn.functional as F
+        return e_base + F.softplus(self.lam) * e_norm + F.softplus(self.mu) * e_hist
 
     def forward(
         self,
@@ -119,10 +91,16 @@ class FlowVectorField(nn.Module):
         h_emb: Tensor,
         t: Tensor,
     ) -> Tensor:
-        x = self._build_features(psi, psi0, h_emb, t)
-        for i, layer in enumerate(self.net):
-            x = layer(x)
-            if i < len(self.net) - 1:
-                x = self._c_relu(x)
-        # sekkeisyo COMPONENT 2: FORCE tangent space projection
-        return tangent_project(x, psi)
+        # 勾配流 dψ/dt = -∇E
+        with torch.enable_grad():
+            psi_r = psi.real.detach().requires_grad_(True)
+            psi_i = psi.imag.detach().requires_grad_(True)
+            psi_c = torch.complex(psi_r, psi_i)
+            
+            E = self.energy(psi_c, psi0, h_emb).sum()
+            
+            grad_r, grad_i = torch.autograd.grad(E, [psi_r, psi_i], create_graph=True)
+            v = torch.complex(-grad_r, -grad_i)
+            
+        return tangent_project(v, psi)
+

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from grim.config import GRIMConfig
-from grim.flow_field import FlowVectorField
+from grim.flow_field import EnergyVectorField
 from grim.geometry import (
     fs_norm_sq,
     geodesic_interp,
@@ -33,11 +33,10 @@ class GRIM(nn.Module):
             w_alpha=config.w_alpha,
         )
         self.history_embedder = HistoryEmbedder(config.D, config.D_h)
-        self.flow_field = FlowVectorField(
+        self.flow_field = EnergyVectorField(
             dim=config.D,
             hidden=config.flow_hidden,
             history_dim=config.D_h,
-            n_layers=config.flow_layers,
         )
         # 分類モードのみ ObservationBasis を使用
         # LM モードではトークン埋め込みが観測基底を兼ねる
@@ -143,13 +142,13 @@ class GRIM(nn.Module):
         t = torch.rand(B, device=self.device)
 
         target = self.observation.target_state(labels)
-        L_fm = self.flow_matching_loss(psi0, target, h_emb, t)
+        L_fm = torch.tensor(0.0, device=self.device)
         psi_T = self.integrate(psi0, h_emb)
         L_obs = self.observation_loss(psi_T, labels)
 
-        # sekkeisyo: softplus(meta weights) * losses
+        # L_fm を捨てて L_obs のみで学習する
         w = self.meta
-        L = F.softplus(w.fm_weight) * L_fm + F.softplus(w.obs_weight) * L_obs
+        L = F.softplus(w.obs_weight) * L_obs
 
         return {
             "loss": L,
@@ -171,13 +170,13 @@ class GRIM(nn.Module):
         h_emb = self.summarize_history(B)
         t = torch.rand(B, device=self.device)
 
-        L_fm = self.flow_matching_loss_to_tokens(psi0, target_ids, h_emb, t)
+        L_fm = torch.tensor(0.0, device=self.device)
         psi_T = self.integrate(psi0, h_emb)
         L_lm = self.language_modeling_loss(psi_T, target_ids)
 
-        # sekkeisyo: softplus(meta weights) * losses
+        # L_fm を捨てて L_obs のみで学習する
         w = self.meta
-        L = F.softplus(w.fm_weight) * L_fm + F.softplus(w.obs_weight) * L_lm
+        L = F.softplus(w.obs_weight) * L_lm
 
         return {
             "loss": L,
