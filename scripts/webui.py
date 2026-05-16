@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from grim.bootstrap import ensure_torch
 from grim.config import GRIMConfig
-from grim.data.text import TextCorpus, get_lm_loaders
+from grim.data.text import CharVocab, TextCorpus, get_lm_loaders
 from grim.model import GRIM
 from grim.training import train, load_checkpoint
 
@@ -43,6 +43,7 @@ def load_corpus(
     max_samples: int | None,
     max_chars: int | None,
     streaming: bool,
+    vocab: CharVocab | None = None,
 ) -> TextCorpus:
     if dataset_name:
         from grim.data.hf_dataset import load_hf_corpus
@@ -63,8 +64,8 @@ def load_corpus(
         return corpus
 
     if data_path and Path(data_path).exists():
-        return TextCorpus(Path(data_path))
-    return TextCorpus(ROOT / "data" / "sample_corpus.txt")
+        return TextCorpus(Path(data_path), vocab=vocab)
+    return TextCorpus(ROOT / "data" / "sample_corpus.txt", vocab=vocab)
 
 
 def generate_text(
@@ -166,6 +167,7 @@ def train_model(
     device: str,
     checkpoint_dir: str,
     no_natural_grad: bool,
+    resume: bool,
 ) -> str:
     import torch
 
@@ -180,6 +182,22 @@ def train_model(
     out = io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(out):
+            device = torch.device(device_name)
+            ckpt_path = Path(checkpoint_dir) / "best.pt"
+            if not ckpt_path.is_absolute():
+                ckpt_path = ROOT / ckpt_path
+            
+            ckpt = None
+            vocab = None
+            if resume:
+                if ckpt_path.exists():
+                    print(f"Resuming from checkpoint: {ckpt_path}")
+                    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+                    if "vocab" in ckpt:
+                        vocab = CharVocab.from_state(ckpt["vocab"])
+                else:
+                    print(f"Warning: Resume requested but {ckpt_path} not found. Starting from scratch.")
+
             corpus = load_corpus(
                 data_path,
                 dataset_name,
@@ -189,21 +207,31 @@ def train_model(
                 max_samples,
                 max_chars,
                 streaming,
+                vocab=vocab,
             )
-            config = GRIMConfig(
-                task_mode="lm",
-                D=D,
-                V=max(corpus.vocab.size, 64),
-                M_max=seq_len,
-                seq_len=seq_len,
-                epochs=epochs,
-                batch_size=batch_size,
-                device=device_name,
-                K=min(10, D),
-            )
-            if fast:
-                config.apply_fast_preset()
-                config.D = D
+            
+            if ckpt and "config" in ckpt:
+                config = ckpt["config"]
+                config.device = device_name
+                config.epochs = epochs
+                config.batch_size = batch_size
+                print(f"Using config from checkpoint (D={config.D}, V={config.V})")
+            else:
+                config = GRIMConfig(
+                    task_mode="lm",
+                    D=D,
+                    V=max(corpus.vocab.size, 64),
+                    M_max=seq_len,
+                    seq_len=seq_len,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    device=device_name,
+                    K=min(10, D),
+                )
+                if fast:
+                    config.apply_fast_preset()
+                    config.D = D
+            
             if no_natural_grad:
                 config.use_natural_grad = False
 
@@ -216,12 +244,14 @@ def train_model(
             )
             config.V = max(config.V, vocab.size)
             model = GRIM(config)
+            if ckpt:
+                model.load_state_dict(ckpt["model"])
+                print("Loaded model weights.")
+                
             print(f"Training on: {corpus.source}")
             print(f"device={device_name}")
             if use_cuda and torch.cuda.is_available():
                 print(f"GPU: {torch.cuda.get_device_name(0)}")
-            if use_cuda and not torch.cuda.is_available():
-                print("警告: GPU が利用できません。 --device cpu で再試行してください。")
 
             train(
                 model,
@@ -295,6 +325,7 @@ def build_ui() -> gr.Blocks:
             train_no_natural = gr.Checkbox(label="no natural grad", value=False)
             train_device = gr.Textbox(label="device", value="", placeholder="cuda or cpu or leave empty")
             train_ckpt_dir = gr.Textbox(label="checkpoint dir", value="checkpoints")
+            train_resume = gr.Checkbox(label="既存のチェックポイントから再開", value=False)
             train_button = gr.Button("学習を開始")
             train_output = gr.Textbox(label="ログ出力", lines=20)
             train_button.click(
@@ -317,6 +348,7 @@ def build_ui() -> gr.Blocks:
                     train_device,
                     train_ckpt_dir,
                     train_no_natural,
+                    train_resume,
                 ],
                 outputs=[train_output],
             )

@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-natural-grad", action="store_true")
     p.add_argument("--fast", action="store_true", help="小型モデル + Euler ODE（高速）")
     p.add_argument("--amp", action="store_true", help="GPU 混合精度（cuda 時のみ）")
+    p.add_argument("--resume", action="store_true", help="既存のチェックポイントから再開")
     return p.parse_args()
 
 
@@ -93,7 +94,7 @@ def print_device_info(device: str) -> None:
         print("  → .\\setup_env_gpu.ps1 を実行するか、--device cpu を使ってください")
 
 
-def load_corpus(args: argparse.Namespace) -> TextCorpus:
+def load_corpus(args: argparse.Namespace, vocab: CharVocab | None = None) -> TextCorpus:
     if args.dataset:
         from grim.data.hf_dataset import load_hf_corpus
 
@@ -117,6 +118,7 @@ def load_corpus(args: argparse.Namespace) -> TextCorpus:
             streaming=streaming,
             dataset_config=args.dataset_config,
             cache_dir=ROOT / "data" / "cache",
+            vocab=vocab,
         )
         chars = len(corpus.text)
         print(
@@ -131,7 +133,7 @@ def load_corpus(args: argparse.Namespace) -> TextCorpus:
 
     path = args.data or str(ROOT / "data" / "sample_corpus.txt")
     print(f"Loading local file: {path}")
-    return TextCorpus(path)
+    return TextCorpus(path, vocab=vocab)
 
 
 def main() -> None:
@@ -146,30 +148,54 @@ def main() -> None:
 
 
 def _main(args: argparse.Namespace) -> None:
-    device = resolve_device(args.device)
-    print_device_info(device)
+    device_name = resolve_device(args.device)
+    device = torch.device(device_name)
+    print_device_info(device_name)
 
-    corpus = load_corpus(args)
-    config = GRIMConfig(
-        task_mode="lm",
-        D=args.D or 256,
-        V=max(corpus.vocab.size, 64),
-        M_max=args.seq_len,
-        seq_len=args.seq_len,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        device=device,
-        K=min(10, args.D or 256),
-    )
-    if args.fast:
-        user_d = args.D
-        config.apply_fast_preset()
-        if user_d != 256:
-            config.D = user_d
+    ckpt_path = ROOT / args.checkpoint_dir / "best.pt"
+    ckpt = None
+    vocab = None
+    if args.resume:
+        if ckpt_path.exists():
+            print(f"Resuming from checkpoint: {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            if "vocab" in ckpt:
+                from grim.data.text import CharVocab
+                vocab = CharVocab.from_state(ckpt["vocab"])
+        else:
+            print(f"Warning: --resume specified but {ckpt_path} not found. Starting from scratch.")
+
+    corpus = load_corpus(args, vocab=vocab)
+    
+    # Use config from checkpoint if available, otherwise create new
+    if ckpt and "config" in ckpt:
+        config = ckpt["config"]
+        config.device = device_name
+        config.epochs = args.epochs # Allow changing epochs
+        config.batch_size = args.batch_size
+        print(f"Using existing config from checkpoint (D={config.D}, V={config.V})")
+    else:
+        config = GRIMConfig(
+            task_mode="lm",
+            D=args.D or 256,
+            V=max(corpus.vocab.size, 64),
+            M_max=args.seq_len,
+            seq_len=args.seq_len,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            device=device_name,
+            K=min(10, args.D or 256),
+        )
+        if args.fast:
+            user_d = args.D
+            config.apply_fast_preset()
+            if user_d != 256:
+                config.D = user_d
+    
     if args.no_natural_grad:
         config.use_natural_grad = False
 
-    use_cuda = device.startswith("cuda")
+    use_cuda = device_name.startswith("cuda")
     train_loader, val_loader, vocab = get_lm_loaders(
         corpus,
         seq_len=config.seq_len,
@@ -179,12 +205,17 @@ def _main(args: argparse.Namespace) -> None:
     config.V = max(config.V, vocab.size)
 
     model = GRIM(config)
+    if ckpt:
+        model.load_state_dict(ckpt["model"])
+        print("Successfully loaded model weights.")
+
     src = args.dataset or corpus.source
     print(
         f"NLP/LM  source={src}  vocab={vocab.size}  seq_len={config.seq_len}  D={config.D}  "
         f"ode={config.ode_solver}({config.euler_steps})  fast={args.fast}  amp={args.amp and use_cuda}"
     )
     payload_extra = {"dataset": args.dataset, "data": args.data, "corpus_source": corpus.source}
+    from grim.training import train
     train(
         model,
         train_loader,

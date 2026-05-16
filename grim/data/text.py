@@ -75,7 +75,7 @@ class TextCorpus:
         "履歴バッファは長い対話の文脈を要約し、忘却を抑える。\n"
     )
 
-    def __init__(self, path: str | Path | None = None, *, text: str | None = None, source: str = "") -> None:
+    def __init__(self, path: str | Path | None = None, *, text: str | None = None, source: str = "", vocab: CharVocab | None = None) -> None:
         if text is not None:
             self.text = text
             self.source = source or "inline"
@@ -85,8 +85,12 @@ class TextCorpus:
         else:
             self.text = self.DEFAULT_SAMPLE
             self.source = "default"
-        self.vocab = CharVocab()
-        self.vocab.build([self.text])
+        
+        if vocab is not None:
+            self.vocab = vocab
+        else:
+            self.vocab = CharVocab()
+            self.vocab.build([self.text])
 
     @classmethod
     def from_text(cls, text: str, source: str = "inline") -> "TextCorpus":
