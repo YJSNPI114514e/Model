@@ -102,14 +102,11 @@ class GRIM(nn.Module):
 
     def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Tensor:
         """
-        sekkeisyo VIOLATION 4 / COMPONENT 4 (Generation):
-        出力確率は Born Rule: p(k) = |⟨e_k|W_proj|ψ_T⟩|²
-        scores / scores.sum() で正規化。softmax は使わない。
+        Born Rule: p(k) = |⟨e_k|ψ_T⟩|² (W_proj 廃止済み)
+        scores / scores.sum() で正規化。
         """
-        scores = self.generation.token_scores(psi_T)
-        # Born Rule 正規化: scores / sum(scores)
-        probs = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-        # NLL loss
+        # generation.born_probs は scores/sum(scores) を返す
+        probs = self.generation.born_probs(psi_T)
         log_probs = torch.log(probs.clamp_min(1e-8))
         return F.nll_loss(log_probs, target_token_ids)
 

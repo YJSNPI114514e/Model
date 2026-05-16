@@ -39,15 +39,16 @@ def integrate_flow(
     y0 = _to_real_flat(psi0)
 
     def dynamics(t_scalar, y_flat):
-        psi = _from_real_flat(y_flat, (B, D))
-        psi = normalize_state(psi)
-        ts = t_scalar.item() if isinstance(t_scalar, torch.Tensor) else float(t_scalar)
-        t_batch = torch.full((B,), ts, device=psi.device, dtype=torch.float32)
-        v = flow_field(psi, psi0, h_emb, t_batch)
-        # sekkeisyo COMPONENT 2: tangent projection is already in flow_field.forward()
-        # but double-check here for unitarity guarantee
-        v = tangent_project(v, psi)
-        return _to_real_flat(v)
+        # AMP autocast を無効化して常に float32 で計算
+        # DOPRI5 の適応ステップ幅制御は float16 では不安定
+        with torch.amp.autocast("cuda", enabled=False):
+            psi = _from_real_flat(y_flat, (B, D))
+            psi = normalize_state(psi)
+            ts = t_scalar.item() if isinstance(t_scalar, torch.Tensor) else float(t_scalar)
+            t_batch = torch.full((B,), ts, device=psi.device, dtype=torch.float32)
+            v = flow_field(psi, psi0, h_emb.float(), t_batch)
+            v = tangent_project(v, psi)
+            return _to_real_flat(v)
 
     t_eval = torch.tensor([t_span[0], t_span[1]], device=psi0.device, dtype=torch.float64)
     solution = odeint(dynamics, y0, t_eval, method=method, rtol=rtol, atol=atol)

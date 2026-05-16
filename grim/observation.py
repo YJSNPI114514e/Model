@@ -1,4 +1,8 @@
-"""観測基底・ボルン則・生成射影（sekkeisyo.txt COMPONENT 4 準拠）。"""
+"""観測基底・ボルン則・生成射影（sekkeisyo.txt COMPONENT 4 準拠）。
+
+修正: W_proj を廃止。psi_T と token_embeddings の直接内積でボルン則を計算。
+scores = |⟨e_k|ψ_T⟩|²
+"""
 
 from __future__ import annotations
 
@@ -14,10 +18,9 @@ from grim.geometry import complex_inner
 class ObservationBasis(nn.Module):
     """
     O = {|o_1⟩, ..., |o_K⟩}  QR正規直交
-    
+
     sekkeisyo COMPONENT 4 (Classification):
-    1. overlaps = obs_basis @ psi_T.conj().T  # [K, B] complex
-    2. probs = abs(overlaps)**2  # Born Rule
+    probs = |⟨o_k|ψ_T⟩|²  — Born Rule
     """
 
     def __init__(self, num_classes: int, dim: int) -> None:
@@ -38,10 +41,7 @@ class ObservationBasis(nn.Module):
             self.basis.copy_(self._orthonormalize(self.basis))
 
     def born_probs(self, psi: Tensor) -> Tensor:
-        """
-        sekkeisyo COMPONENT 4: p(k) = |⟨o_k|ψ_T⟩|²
-        NOT softmax. Born Rule only.
-        """
+        """p(k) = |⟨o_k|ψ_T⟩|²"""
         overlaps = complex_inner(self.basis.unsqueeze(0), psi.unsqueeze(1), dim=-1)
         probs = torch.abs(overlaps) ** 2
         return probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -61,34 +61,27 @@ class ObservationBasis(nn.Module):
 
 class GenerationHead(nn.Module):
     """
-    sekkeisyo COMPONENT 4 (Generation):
-    1. e_out = W_proj @ psi_T  # [B, D] complex
-    2. scores = abs(token_embeddings @ e_out.conj().T)**2  # [B, V]
-    3. probs = scores / scores.sum(dim=-1, keepdim=True)
+    W_proj 廃止。psi_T と token_embeddings の直接ボルン則。
+
+    scores = |⟨e_k|ψ_T⟩|²
+    probs = scores / sum(scores)
     """
 
     def __init__(self, dim: int, tokenizer: nn.Module) -> None:
         super().__init__()
-        scale = 1.0 / math.sqrt(dim)
-        self.W_re = nn.Parameter(torch.randn(dim, dim) * scale)
-        self.W_im = nn.Parameter(torch.randn(dim, dim) * scale)
+        self.dim = dim
         self.tokenizer = tokenizer
-
-    @property
-    def W_proj(self) -> Tensor:
-        return torch.complex(self.W_re, self.W_im)
-
-    def project(self, psi: Tensor) -> Tensor:
-        return psi @ self.W_proj
+        # W_proj は廃止。psi_T を直接トークン埋め込みと比較する。
 
     def token_scores(self, psi: Tensor) -> Tensor:
         """
-        sekkeisyo COMPONENT 4:
-        scores = |⟨e_k|W_proj|ψ_T⟩|² — Born Rule, NOT softmax
+        scores = |⟨e_k|ψ_T⟩|²
+        psi_T を直接全トークン埋め込みと内積。これがボルン則の射影。
         """
-        e_out = self.project(psi)
-        emb = self.tokenizer.embeddings
-        overlaps = complex_inner(emb.unsqueeze(0), e_out.unsqueeze(1), dim=-1)
+        emb = self.tokenizer.embeddings  # [V, D] complex
+        # ⟨e_k|ψ_T⟩ = sum(conj(e_k) * ψ_T)
+        # emb: [V, D], psi: [B, D] → overlaps: [B, V]
+        overlaps = torch.mm(psi, emb.conj().T)  # [B, V]
         return torch.abs(overlaps) ** 2
 
     def born_probs(self, psi: Tensor) -> Tensor:
@@ -128,9 +121,8 @@ class GenerationHead(nn.Module):
                 if 0 <= tid < probs.shape[-1]:
                     probs[:, tid] = probs[:, tid] / repetition_penalty
 
-        # Temperature scaling (Born Rule 確率に直接適用)
+        # Temperature scaling
         if temperature > 0 and temperature != 1.0:
-            # log → scale → exp でtemperatureを適用
             log_probs = torch.log(probs.clamp_min(1e-8))
             log_probs = log_probs / temperature
             probs = torch.exp(log_probs)

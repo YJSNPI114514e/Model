@@ -93,9 +93,11 @@ def train_epoch(
     kfac: KFACNaturalGradient | None,
     global_step: int,
     use_amp: bool = False,
-) -> tuple[float, int]:
+) -> tuple[float, float, float, int]:
     model.train()
     total_loss = 0.0
+    total_fm = 0.0
+    total_obs = 0.0
     n_batches = 0
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -172,9 +174,12 @@ def train_epoch(
 
         global_step += 1
         total_loss += loss.item()
+        total_fm += out["loss_fm"].item()
+        total_obs += out["loss_obs"].item()
         n_batches += 1
 
-    return total_loss / max(n_batches, 1), global_step
+    d = max(n_batches, 1)
+    return total_loss / d, total_fm / d, total_obs / d, global_step
 
 
 def train(
@@ -217,7 +222,7 @@ def train(
     global_step = 0
 
     for epoch in range(1, config.epochs + 1):
-        avg_loss, global_step = train_epoch(
+        avg_loss, avg_fm, avg_obs, global_step = train_epoch(
             model, train_loader, k2_optimizer, k3_optimizer,
             device, config, kfac, global_step, use_amp=use_amp,
         )
@@ -226,7 +231,8 @@ def train(
             meta_w = model.meta.as_dict()
             print(
                 f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  "
-                f"val_token_acc={acc:.4f}  val_ppl~{ppl:.2f}  "
+                f"L_fm={avg_fm:.4f}  L_obs={avg_obs:.4f}  "
+                f"val_token_acc={acc:.6f}  val_ppl~{ppl:.2f}  "
                 f"fm_w={meta_w['fm_weight']:.3f}  obs_w={meta_w['obs_weight']:.3f}"
             )
             metric = acc
