@@ -45,6 +45,10 @@ def load_corpus(
     streaming: bool,
     vocab: CharVocab | None = None,
 ) -> TextCorpus:
+    if data_path:
+        data_path = data_path.strip().strip("'\"")
+    if dataset_name:
+        dataset_name = dataset_name.strip().strip("'\"")
     if dataset_name:
         from grim.data.hf_dataset import load_hf_corpus
 
@@ -179,6 +183,9 @@ def train_model(
     batch_size = int(batch_size)
     seq_len = int(seq_len)
     D = int(D)
+    data_path = data_path.strip().strip("'\"") if data_path else ""
+    dataset_name = dataset_name.strip().strip("'\"") if dataset_name else ""
+    checkpoint_dir = checkpoint_dir.strip().strip("'\"") if checkpoint_dir else "checkpoints"
     out = io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(out):

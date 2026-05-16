@@ -80,6 +80,7 @@ def load_hf_text(
     Returns:
         (text, column_name)
     """
+    dataset = dataset.strip().strip("'\"")
     try:
         from datasets import load_dataset
     except ImportError as exc:

@@ -1,0 +1,4 @@
+[console_scripts]
+grim-generate = scripts.generate:main
+grim-train = scripts.train:main
+grim-webui = scripts.webui:main

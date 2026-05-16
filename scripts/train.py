@@ -96,6 +96,7 @@ def print_device_info(device: str) -> None:
 
 def load_corpus(args: argparse.Namespace, vocab: CharVocab | None = None) -> TextCorpus:
     if args.dataset:
+        args.dataset = args.dataset.strip().strip("'\"")
         from grim.data.hf_dataset import load_hf_corpus
 
         streaming = args.streaming
@@ -132,6 +133,7 @@ def load_corpus(args: argparse.Namespace, vocab: CharVocab | None = None) -> Tex
         return corpus
 
     path = args.data or str(ROOT / "data" / "sample_corpus.txt")
+    path = path.strip().strip("'\"")
     print(f"Loading local file: {path}")
     return TextCorpus(path, vocab=vocab)
 
