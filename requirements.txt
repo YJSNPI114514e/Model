@@ -1,0 +1,7 @@
+# PyTorch は setup_env.ps1 で CPU 版を入れること（グローバル CUDA 版は DLL エラーの原因になり得る）
+torchdiffeq>=0.2.3
+numpy>=1.24.0
+tqdm>=4.65.0
+datasets>=2.14.0
+huggingface_hub>=0.20.0
+gradio>=3.0.0
