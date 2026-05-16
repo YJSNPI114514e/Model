@@ -153,7 +153,14 @@ def load_hf_text(
 
     return text, col
 
-
+def load_hf_corpus(
+    dataset: str,
+    *,
+    split: str = "train",
+    text_column: str | None = None,
+    max_samples: int | None = None,
+    max_chars: int | None = None,
+    streaming: bool = False,
     dataset_config: str | None = None,
     cache_dir: str | Path | None = None,
     vocab: Any | None = None,
