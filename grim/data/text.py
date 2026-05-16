@@ -93,8 +93,8 @@ class TextCorpus:
             self.vocab.build([self.text])
 
     @classmethod
-    def from_text(cls, text: str, source: str = "inline") -> "TextCorpus":
-        return cls(text=text, source=source)
+    def from_text(cls, text: str, source: str = "inline", vocab: CharVocab | None = None) -> "TextCorpus":
+        return cls(text=text, source=source, vocab=vocab)
 
     def prepare_for_training(self) -> None:
         """巨大テキストを token id 列に変換し、元文字列を解放する。"""
