@@ -30,12 +30,15 @@ class ComplexTokenizer(nn.Module):
         self.max_len = max_len
         self.w_alpha = w_alpha
 
-        re = torch.randn(vocab_size, dim) / math.sqrt(dim)
-        im = torch.randn(vocab_size, dim) / math.sqrt(dim)
-        self.embeddings = nn.Parameter(torch.complex(re, im))
+        self.emb_re = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
+        self.emb_im = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
 
         self.w_phi = nn.Parameter(torch.tensor(1.0))
         self.b_phi = nn.Parameter(torch.tensor(0.0))
+
+    @property
+    def embeddings(self) -> Tensor:
+        return torch.complex(self.emb_re, self.emb_im)
 
     def phase(self, positions: Tensor) -> Tensor:
         """φ_j = w_φ · j / M_max + b_φ"""

@@ -40,7 +40,7 @@ class GRIM(nn.Module):
             n_layers=config.flow_layers,
         )
         self.observation = ObservationBasis(config.K, config.D)
-        self.generation = GenerationHead(config.D, self.tokenizer.embeddings)
+        self.generation = GenerationHead(config.D, self.tokenizer)
         self.meta = MetaParams(beta=config.beta_kl)
         self._history: HistoryBuffer | None = None
 

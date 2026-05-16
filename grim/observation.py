@@ -52,12 +52,12 @@ class ObservationBasis(nn.Module):
 class GenerationHead(nn.Module):
     """|e_out⟩ = W_proj |ψ_T⟩"""
 
-    def __init__(self, dim: int, token_embeddings: nn.Parameter) -> None:
+    def __init__(self, dim: int, tokenizer: nn.Module) -> None:
         super().__init__()
         scale = 1.0 / math.sqrt(dim)
         self.W_re = nn.Parameter(torch.randn(dim, dim) * scale)
         self.W_im = nn.Parameter(torch.randn(dim, dim) * scale)
-        self.token_embeddings = token_embeddings
+        self.tokenizer = tokenizer
 
     @property
     def W_proj(self) -> Tensor:
@@ -68,7 +68,7 @@ class GenerationHead(nn.Module):
 
     def token_scores(self, psi: Tensor) -> Tensor:
         e_out = self.project(psi)
-        emb = self.token_embeddings
+        emb = self.tokenizer.embeddings
         overlaps = complex_inner(emb.unsqueeze(0), e_out.unsqueeze(1), dim=-1)
         return torch.abs(overlaps) ** 2
 
