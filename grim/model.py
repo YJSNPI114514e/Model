@@ -39,7 +39,10 @@ class GRIM(nn.Module):
             history_dim=config.D_h,
             n_layers=config.flow_layers,
         )
-        self.observation = ObservationBasis(config.K, config.D)
+        # 分類モードのみ ObservationBasis を使用
+        # LM モードではトークン埋め込みが観測基底を兼ねる
+        if config.task_mode == "classify":
+            self.observation = ObservationBasis(config.K, config.D)
         self.generation = GenerationHead(config.D, self.tokenizer)
         self.meta = MetaParams(beta=config.beta_kl)
         self._history: HistoryBuffer | None = None
@@ -294,4 +297,5 @@ class GRIM(nn.Module):
         return generated
 
     def reorthogonalize_obs(self) -> None:
-        self.observation.reorthogonalize()
+        if self.config.task_mode == "classify":
+            self.observation.reorthogonalize()

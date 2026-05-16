@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -15,11 +16,12 @@ from grim.natural_grad import KFACNaturalGradient
 
 
 @torch.no_grad()
-def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[float, float]:
-    """次トークン精度とパープレキシティ（近似）。"""
+def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[float, float, float]:
+    """次トークン精度、パープレキシティ、P(y_true) 平均。"""
     model.eval()
     correct = total = 0
     total_nll = 0.0
+    total_p_true = 0.0
     for batch in loader:
         if len(batch) == 3:
             x, y, mask = batch
@@ -29,16 +31,29 @@ def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[
         x, y = x.to(device), y.to(device)
         if mask is not None:
             mask = mask.to(device)
-        pred = model.predict_next_token(x, mask)
-        correct += (pred == y).sum().item()
-        total += y.numel()
         psi0 = model.tokenize(x, mask)
         h_emb = model.summarize_history(x.shape[0])
         psi_T = model.integrate(psi0, h_emb)
-        total_nll += model.language_modeling_loss(psi_T, y).item() * y.numel()
+
+        # Born Rule 確率
+        probs = model.generation.born_probs(psi_T)  # [B, V]
+        pred = probs.argmax(dim=-1)
+        correct += (pred == y).sum().item()
+        total += y.numel()
+
+        # P(y_true): 正解トークンの平均確率
+        p_true = probs[torch.arange(y.shape[0], device=device), y]  # [B]
+        total_p_true += p_true.sum().item()
+
+        # NLL for perplexity
+        log_probs = torch.log(probs.clamp_min(1e-8))
+        import torch.nn.functional as F
+        total_nll += F.nll_loss(log_probs, y, reduction="sum").item()
+
     acc = correct / max(total, 1)
     ppl = float(torch.exp(torch.tensor(total_nll / max(total, 1))))
-    return acc, ppl
+    avg_p_true = total_p_true / max(total, 1)
+    return acc, ppl, avg_p_true
 
 
 @torch.no_grad()
@@ -62,7 +77,7 @@ def evaluate_classify(model: GRIM, loader: DataLoader, device: torch.device) -> 
 
 def evaluate(model: GRIM, loader: DataLoader, device: torch.device) -> float:
     if model.config.task_mode == "lm":
-        acc, _ = evaluate_lm(model, loader, device)
+        acc, _, _ = evaluate_lm(model, loader, device)
         return acc
     return evaluate_classify(model, loader, device)
 
@@ -160,14 +175,14 @@ def train_epoch(
             model.history.decay()
 
         # --- K=3: META UPDATE (every k3_interval steps) ---
-        # sekkeisyo: meta_loss = mean(L_obs) + beta * KL(meta_weights || historical)
+        # メタ損失: 全体の weighted loss を通して fm_weight/obs_weight に勾配を流す
         if do_meta:
             k3_optimizer.zero_grad(set_to_none=True)
-            meta_loss = model.meta.compute_meta_loss(out["loss_obs"].detach().clone().requires_grad_(False))
-            # Need to recompute with grad for meta params
             with torch.amp.autocast("cuda", enabled=use_amp):
                 meta_out = model.forward_train_batch(x, y, mask)
-            meta_total = model.meta.compute_meta_loss(meta_out["loss_obs"])
+            # meta_out["loss"] = softplus(fm_w)*L_fm + softplus(obs_w)*L_obs
+            # → fm_weight, obs_weight に勾配が流れる
+            meta_total = meta_out["loss"] + F.softplus(model.meta.meta_beta) * model.meta.kl_to_history()
             meta_total.backward()
             k3_optimizer.step()
             model.meta.momentum_update()
@@ -227,12 +242,14 @@ def train(
             device, config, kfac, global_step, use_amp=use_amp,
         )
         if config.task_mode == "lm":
-            acc, ppl = evaluate_lm(model, val_loader, device)
+            acc, ppl, avg_p_true = evaluate_lm(model, val_loader, device)
             meta_w = model.meta.as_dict()
+            random_p = 1.0 / config.V
             print(
                 f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  "
                 f"L_fm={avg_fm:.4f}  L_obs={avg_obs:.4f}  "
                 f"val_token_acc={acc:.6f}  val_ppl~{ppl:.2f}  "
+                f"P(y_true)={avg_p_true:.6f} (random={random_p:.6f})  "
                 f"fm_w={meta_w['fm_weight']:.3f}  obs_w={meta_w['obs_weight']:.3f}"
             )
             metric = acc
