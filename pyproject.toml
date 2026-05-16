@@ -25,5 +25,6 @@ grim-train = "scripts.train:main"
 grim-webui = "scripts.webui:main"
 grim-generate = "scripts.generate:main"
 
-[tool.setuptools]
-packages = ["grim", "scripts"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grim*", "scripts*"]
