@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="HF データセットの最大文字数（既定: 150000）",
     )
+    p.add_argument("--data-files", type=str, default=None, help="datasets ライブラリ用データファイルパス")
     p.add_argument("--streaming", action="store_true", help="ストリーミング読み込み")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=16)
@@ -120,6 +121,7 @@ def load_corpus(args: argparse.Namespace, vocab: CharVocab | None = None) -> Tex
             dataset_config=args.dataset_config,
             cache_dir=ROOT / "data" / "cache",
             vocab=vocab,
+            data_files=args.data_files,
         )
         chars = len(corpus.text)
         print(

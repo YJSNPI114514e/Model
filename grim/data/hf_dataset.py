@@ -74,6 +74,8 @@ def load_hf_text(
     trust_remote_code: bool = False,
     cache_dir: str | Path | None = None,
     vocab: Any | None = None,
+    data_files: str | list[str] | dict[str, str | list[str]] | None = None,
+    **kwargs: Any,
 ) -> tuple[str, str]:
     """
     load_dataset("fn-aka-mur/wiki40b_ja") 相当をテキスト1本に連結。
@@ -95,7 +97,9 @@ def load_hf_text(
             print(f"  cache hit: {cache_path}", flush=True)
             return cache_path.read_text(encoding="utf-8"), "text"
 
-    base_kw: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+    base_kw: dict[str, Any] = {"trust_remote_code": trust_remote_code, **kwargs}
+    if data_files is not None:
+        base_kw["data_files"] = data_files
 
     if streaming:
         stream_kw = {**base_kw, "split": split, "streaming": True}
@@ -164,6 +168,8 @@ def load_hf_corpus(
     dataset_config: str | None = None,
     cache_dir: str | Path | None = None,
     vocab: Any | None = None,
+    data_files: str | list[str] | dict[str, str | list[str]] | None = None,
+    **kwargs: Any,
 ):
     """TextCorpus を HF データセットから構築。"""
     from grim.data.text import TextCorpus
@@ -184,6 +190,8 @@ def load_hf_corpus(
         dataset_config=dataset_config,
         cache_dir=cache_dir,
         vocab=vocab,
+        data_files=data_files,
+        **kwargs,
     )
     source = f"hf:{dataset}" + (f"/{dataset_config}" if dataset_config else "") + f"/{split}:{col}"
     return TextCorpus.from_text(text, source=source, vocab=vocab), col
