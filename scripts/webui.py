@@ -364,8 +364,15 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="GRIM Web UI")
+    parser.add_argument("--share", action="store_true", help="Gradio public link を作成 (Colab 等で必要)")
+    parser.add_argument("--port", type=int, default=7860, help="起動ポート")
+    args = parser.parse_args()
+
     demo = build_ui()
-    demo.launch()
+    demo.launch(share=args.share, server_port=args.port)
 
 
 if __name__ == "__main__":

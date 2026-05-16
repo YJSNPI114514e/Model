@@ -4,3 +4,4 @@ __pycache__/
 checkpoints/
 data/MNIST/
 *.pt
+Colab_Demo.ipynb
