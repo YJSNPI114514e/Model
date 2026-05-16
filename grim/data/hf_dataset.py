@@ -73,6 +73,7 @@ def load_hf_text(
     dataset_config: str | None = None,
     trust_remote_code: bool = False,
     cache_dir: str | Path | None = None,
+    vocab: Any | None = None,
 ) -> tuple[str, str]:
     """
     load_dataset("fn-aka-mur/wiki40b_ja") 相当をテキスト1本に連結。
@@ -153,19 +154,18 @@ def load_hf_text(
     return text, col
 
 
-def load_hf_corpus(
-    dataset: str,
-    *,
-    split: str = "train",
-    text_column: str | None = None,
-    max_samples: int | None = None,
-    max_chars: int | None = None,
-    streaming: bool = False,
     dataset_config: str | None = None,
     cache_dir: str | Path | None = None,
+    vocab: Any | None = None,
 ):
     """TextCorpus を HF データセットから構築。"""
     from grim.data.text import TextCorpus
+
+    # URL 形式の場合、データセット ID を抽出
+    if dataset.startswith("https://huggingface.co/datasets/"):
+        dataset = dataset.replace("https://huggingface.co/datasets/", "").split("?")[0].split("#")[0]
+        if dataset.endswith("/"):
+            dataset = dataset[:-1]
 
     text, col = load_hf_text(
         dataset,
@@ -176,6 +176,7 @@ def load_hf_corpus(
         streaming=streaming,
         dataset_config=dataset_config,
         cache_dir=cache_dir,
+        vocab=vocab,
     )
     source = f"hf:{dataset}" + (f"/{dataset_config}" if dataset_config else "") + f"/{split}:{col}"
-    return TextCorpus.from_text(text, source=source), col
+    return TextCorpus.from_text(text, source=source, vocab=vocab), col
