@@ -62,9 +62,9 @@ class ComplexTokenizer(nn.Module):
         B, L, D = emb.shape
 
         # Construct skew-Hermitian matrix X = A + iB
-        A = self.raw_A - self.raw_A.T
-        B = self.raw_B + self.raw_B.T
-        X = torch.complex(A, B)
+        A_mat = self.raw_A - self.raw_A.T
+        B_mat = self.raw_B + self.raw_B.T
+        X = torch.complex(A_mat, B_mat)
 
         # Positions: j = 0, ..., L-1
         j = torch.arange(L, dtype=self.raw_A.dtype, device=token_ids.device).view(L, 1, 1)
