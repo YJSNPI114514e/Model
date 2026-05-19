@@ -18,7 +18,7 @@ Write-Host "Installing CUDA PyTorch (cu124) ..."
 & $py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $py -m pip install torchdiffeq tqdm numpy datasets huggingface_hub 2>&1 | Out-Host
+& $py -m pip install torchdiffeq tqdm numpy datasets huggingface_hub gradio 2>&1 | Out-Host
 
 $ErrorActionPreference = "Stop"
 

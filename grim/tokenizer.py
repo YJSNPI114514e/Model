@@ -13,8 +13,8 @@ from grim.geometry import complex_inner, normalize_state
 
 class ComplexTokenizer(nn.Module):
     """
-    |ψ₀⟩ = Z^{-1/2} Σ_j α_j e^{iφ_j} |e_{t_j}⟩
-    α_j = softmax(w_α · Re(|e_{t_j}⟩))
+    |ψ₀⟩ = Z^{-1/2} Σ_j α_j e^{iφ_j} T^j |e_{t_j}⟩
+    α_j = softmax(w_α · Re(T^j |e_{t_j}⟩))
     """
 
     def __init__(
@@ -36,6 +36,10 @@ class ComplexTokenizer(nn.Module):
         self.w_phi = nn.Parameter(torch.tensor(1.0))
         self.b_phi = nn.Parameter(torch.tensor(0.0))
 
+        # Unitary transition matrix parameters
+        self.raw_A = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        self.raw_B = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+
     @property
     def embeddings(self) -> Tensor:
         return torch.complex(self.emb_re, self.emb_im)
@@ -56,9 +60,26 @@ class ComplexTokenizer(nn.Module):
         """
         emb = self.token_states(token_ids)
         B, L, D = emb.shape
+
+        # Construct skew-Hermitian matrix X = A + iB
+        A = self.raw_A - self.raw_A.T
+        B = self.raw_B + self.raw_B.T
+        X = torch.complex(A, B)
+
+        # Positions: j = 0, ..., L-1
+        j = torch.arange(L, dtype=self.raw_A.dtype, device=token_ids.device).view(L, 1, 1)
+        X_all = j * X  # [L, D, D]
+
+        # T^j = exp(j * X)
+        T_all = torch.linalg.matrix_exp(X_all)  # [L, D, D]
+
+        # Apply T^j to emb
+        rotated = torch.einsum("lxy,bly->blx", T_all, emb)  # [B, L, D]
+
+        # Apply phase rotation
         pos = torch.arange(L, device=token_ids.device).view(1, L).expand(B, L)
         phase = self.phase(pos)
-        rotated = emb * torch.exp(1j * phase).unsqueeze(-1)
+        rotated = rotated * torch.exp(1j * phase).unsqueeze(-1)
 
         scores = self.w_alpha * rotated.real.sum(dim=-1)
         if mask is not None:

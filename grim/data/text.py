@@ -144,17 +144,24 @@ def get_lm_loaders(
     corpus: TextCorpus,
     seq_len: int = 64,
     batch_size: int = 16,
-    val_ratio: float = 0.1,
+    val_ratio: float = 0.3,
     pin_memory: bool = False,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader, CharVocab]:
-    ds = corpus.lm_dataset(seq_len)
-    n = len(ds)
-    if n < 2:
+    token_ids = corpus.token_ids
+    n = len(token_ids)
+    if n < seq_len + 2:
         raise ValueError("コーパスが短すぎます。data/sample_corpus.txt を長くしてください。")
-    n_val = max(1, int(n * val_ratio))
-    n_train = n - n_val
-    train_ds, val_ds = random_split(ds, [n_train, n_val])
+    
+    n_val_tokens = int(n * val_ratio)
+    n_train_tokens = n - n_val_tokens
+    
+    train_ids = token_ids[:n_train_tokens]
+    val_ids = token_ids[n_train_tokens:]
+    
+    train_ds = LanguageModelDataset(train_ids, corpus.vocab, seq_len)
+    val_ds = LanguageModelDataset(val_ids, corpus.vocab, seq_len)
+    
     kw = {"num_workers": num_workers, "pin_memory": pin_memory}
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **kw)

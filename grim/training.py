@@ -19,36 +19,46 @@ from grim.natural_grad import KFACNaturalGradient
 def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[float, float, float]:
     """次トークン精度、パープレキシティ、P(y_true) 平均。"""
     model.eval()
+    
+    # Save training history, clear it for evaluation, restore it afterward
+    saved_history = list(model.history._entries)
+    model.history.clear()
+    
     correct = total = 0
     total_nll = 0.0
     total_p_true = 0.0
-    for batch in loader:
-        if len(batch) == 3:
-            x, y, mask = batch
-        else:
-            x, y = batch
-            mask = None
-        x, y = x.to(device), y.to(device)
-        if mask is not None:
-            mask = mask.to(device)
-        psi0 = model.tokenize(x, mask)
-        h_emb = model.summarize_history(x.shape[0])
-        psi_T = model.integrate(psi0, h_emb)
+    try:
+        for batch in loader:
+            if len(batch) == 3:
+                x, y, mask = batch
+            else:
+                x, y = batch
+                mask = None
+            x, y = x.to(device), y.to(device)
+            if mask is not None:
+                mask = mask.to(device)
+            psi0 = model.tokenize(x, mask)
+            h_emb = model.summarize_history(x.shape[0])
+            psi_T = model.integrate(psi0, h_emb)
 
-        # Born Rule 確率
-        probs = model.generation.born_probs(psi_T)  # [B, V]
-        pred = probs.argmax(dim=-1)
-        correct += (pred == y).sum().item()
-        total += y.numel()
+            # Born Rule 確率
+            probs = model.generation.born_probs(psi_T)  # [B, V]
+            pred = probs.argmax(dim=-1)
+            correct += (pred == y).sum().item()
+            total += y.numel()
 
-        # P(y_true): 正解トークンの平均確率
-        p_true = probs[torch.arange(y.shape[0], device=device), y]  # [B]
-        total_p_true += p_true.sum().item()
+            # P(y_true): 正解トークンの平均確率
+            p_true = probs[torch.arange(y.shape[0], device=device), y]  # [B]
+            total_p_true += p_true.sum().item()
 
-        # NLL for perplexity
-        log_probs = torch.log(probs.clamp_min(1e-8))
-        import torch.nn.functional as F
-        total_nll += F.nll_loss(log_probs, y, reduction="sum").item()
+            # NLL for perplexity
+            log_probs = torch.log(probs.clamp_min(1e-8))
+            total_nll += F.nll_loss(log_probs, y, reduction="sum").item()
+    finally:
+        # Restore training history
+        model.history.clear()
+        for e in saved_history:
+            model.history._entries.append(e)
 
     acc = correct / max(total, 1)
     ppl = float(torch.exp(torch.tensor(total_nll / max(total, 1))))
@@ -108,11 +118,13 @@ def train_epoch(
     kfac: KFACNaturalGradient | None,
     global_step: int,
     use_amp: bool = False,
-) -> tuple[float, float, float, int]:
+) -> tuple[float, float, float, float, int]:
     model.train()
     total_loss = 0.0
     total_fm = 0.0
     total_obs = 0.0
+    train_acc_sum = 0
+    train_acc_total = 0
     n_batches = 0
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -164,11 +176,24 @@ def train_epoch(
         if model.config.task_mode == "classify":
             model.reorthogonalize_obs()
 
+        # Track train token accuracy
+        with torch.no_grad():
+            psi_T = out["psi_T"].detach()
+            if model.config.task_mode == "lm":
+                probs = model.generation.born_probs(psi_T)
+                pred = probs.argmax(dim=-1)
+                train_acc_sum += (pred == y).sum().item()
+                train_acc_total += y.numel()
+            else:
+                probs = model.observation.born_probs(psi_T)
+                pred = probs.argmax(dim=-1)
+                train_acc_sum += (pred == y).sum().item()
+                train_acc_total += y.numel()
+
         # --- HISTORY UPDATE ---
         # sekkeisyo: history_buffer.push(psi_T.detach())
         #            then decay all weights
         with torch.no_grad():
-            psi_T = out["psi_T"].detach()
             # Push batch mean state (or first element for single-sample)
             if psi_T.dim() == 2 and psi_T.shape[0] > 0:
                 model.history.push(psi_T[0])
@@ -194,7 +219,8 @@ def train_epoch(
         n_batches += 1
 
     d = max(n_batches, 1)
-    return total_loss / d, total_fm / d, total_obs / d, global_step
+    avg_train_acc = train_acc_sum / max(train_acc_total, 1)
+    return total_loss / d, total_fm / d, total_obs / d, avg_train_acc, global_step
 
 
 def train(
@@ -237,7 +263,7 @@ def train(
     global_step = 0
 
     for epoch in range(1, config.epochs + 1):
-        avg_loss, avg_fm, avg_obs, global_step = train_epoch(
+        avg_loss, avg_fm, avg_obs, avg_train_acc, global_step = train_epoch(
             model, train_loader, k2_optimizer, k3_optimizer,
             device, config, kfac, global_step, use_amp=use_amp,
         )
@@ -247,7 +273,7 @@ def train(
             random_p = 1.0 / config.V
             print(
                 f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  "
-                f"L_fm={avg_fm:.4f}  L_obs={avg_obs:.4f}  "
+                f"train_acc={avg_train_acc:.6f}  "
                 f"val_token_acc={acc:.6f}  val_ppl~{ppl:.2f}  "
                 f"P(y_true)={avg_p_true:.6f} (random={random_p:.6f})  "
                 f"fm_w={meta_w['fm_weight']:.3f}  obs_w={meta_w['obs_weight']:.3f}"
@@ -255,7 +281,10 @@ def train(
             metric = acc
         else:
             acc = evaluate_classify(model, val_loader, device)
-            print(f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  val_acc={acc:.4f}")
+            print(
+                f"epoch {epoch}/{config.epochs}  loss={avg_loss:.4f}  "
+                f"train_acc={avg_train_acc:.4f}  val_acc={acc:.4f}"
+            )
             metric = acc
 
         if metric >= best_metric:

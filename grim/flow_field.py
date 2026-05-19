@@ -45,62 +45,93 @@ def sinusoidal_embedding(t: Tensor, dim: int) -> Tensor:
     return emb
 
 
+def inv_softplus(y: float) -> float:
+    return math.log(math.exp(y) - 1.0)
+
+
 class EnergyVectorField(nn.Module):
     """
-    E(psi) = -log|⟨psi|psi_0⟩|² + λ·‖psi‖² + μ·MLP(psi, h_emb)
+    E(psi) = E_world + E_self + E_cont + E_explore
     v = dψ/dt = -∇E
     """
 
-    def __init__(self, dim: int, hidden: int, history_dim: int) -> None:
+    def __init__(
+        self,
+        dim: int,
+        hidden: int,
+        history_dim: int,
+        tokenizer: nn.Module,
+        history_getter: callable,
+        generation: nn.Module,
+    ) -> None:
         super().__init__()
         self.dim = dim
-        self.lam = nn.Parameter(torch.tensor(-2.0))  # softplus(-2) ≈ 0.126
-        self.mu = nn.Parameter(torch.tensor(-2.0))
-        
-        self.history_mlp = nn.Sequential(
-            nn.Linear(dim * 2 + history_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1)
-        )
+        self.tokenizer = tokenizer
+        self.history_getter = history_getter
+        self.generation = generation
 
-    def energy(self, psi: Tensor, psi0: Tensor, h_emb: Tensor) -> Tensor:
-        # -log|⟨psi|psi_0⟩|²
+        # Learnable scalars (softplus parameters)
+        self.raw_lam = nn.Parameter(torch.tensor(-4.6))    # lam: softplus(-4.6) ≈ 0.01
+        self.raw_mu = nn.Parameter(torch.tensor(-4.6))     # mu: softplus(-4.6) ≈ 0.01
+        self.raw_sigma = nn.Parameter(torch.tensor(0.0))    # sigma: softplus(0.0) ≈ 0.693
+        self.raw_beta = nn.Parameter(torch.tensor(-4.6))    # beta: softplus(-4.6) ≈ 0.01
+
+    def energy(self, psi: Tensor, psi0: Tensor) -> Tensor:
+        # 1. World potential (E_world)
         overlap = complex_inner(psi, psi0, dim=-1)
         overlap_sq = torch.abs(overlap)**2
-        e_base = -torch.log(overlap_sq.clamp_min(1e-8))
-        
-        # ‖psi‖²
+        e_world = -torch.log(overlap_sq.clamp_min(1e-8))
+
+        # 2. Self-energy (E_self)
         e_norm = torch.sum(torch.abs(psi)**2, dim=-1)
-        
-        B = psi.shape[0]
-        if h_emb.shape[0] != B:
-            h_emb = h_emb.expand(B, -1)
-            
-        feat = torch.cat([psi.real, psi.imag, h_emb], dim=-1)
-        e_hist = self.history_mlp(feat).squeeze(-1)
-        
-        import torch.nn.functional as F
-        return e_base + F.softplus(self.lam) * e_norm + F.softplus(self.mu) * e_hist
+        lam = F.softplus(self.raw_lam)
+        e_self = lam * e_norm
+
+        # 3. Continuation potential (E_cont)
+        history = self.history_getter()
+        entries = history._entries if history is not None else []
+        if not entries:
+            e_cont = torch.zeros(psi.shape[0], device=psi.device, dtype=psi.real.dtype)
+        else:
+            psis = torch.stack([e.psi.squeeze(0) for e in entries], dim=0)  # [H_len, D]
+            weights = torch.tensor([e.weight for e in entries], device=psi.device, dtype=psi.real.dtype)
+
+            # overlaps: [B, H_len]
+            overlaps = torch.mm(psi, psis.conj().T)
+            abs_overlap = torch.abs(overlaps).clamp(0.0, 1.0)
+            d = torch.acos(abs_overlap)  # Fubini-Study distance [B, H_len]
+
+            sigma = F.softplus(self.raw_sigma).clamp_min(1e-8)
+            kernel = torch.exp(- (d**2) / (2 * sigma**2))  # [B, H_len]
+
+            mu = F.softplus(self.raw_mu)
+            weighted_sum = torch.sum(weights.unsqueeze(0) * kernel, dim=-1)  # [B]
+            e_cont = - (mu / len(entries)) * weighted_sum
+
+        # 4. Exploration potential (E_explore)
+        probs = self.generation.born_probs(psi)  # [B, V]
+        beta = F.softplus(self.raw_beta)
+        e_explore = - beta * torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+
+        return e_world + e_self + e_cont + e_explore
 
     def forward(
         self,
         psi: Tensor,
         psi0: Tensor,
-        h_emb: Tensor,
-        t: Tensor,
+        h_emb: Tensor,  # kept for signature compatibility
+        t: Tensor,      # kept for signature compatibility
     ) -> Tensor:
-        # 勾配流 dψ/dt = -∇E
+        # dψ/dt = -∇E
         with torch.enable_grad():
             psi_r = psi.real.detach().requires_grad_(True)
             psi_i = psi.imag.detach().requires_grad_(True)
             psi_c = torch.complex(psi_r, psi_i)
-            
-            E = self.energy(psi_c, psi0, h_emb).sum()
-            
+
+            E = self.energy(psi_c, psi0).sum()
+
             grad_r, grad_i = torch.autograd.grad(E, [psi_r, psi_i], create_graph=True)
             v = torch.complex(-grad_r, -grad_i)
-            
+
         return tangent_project(v, psi)
 

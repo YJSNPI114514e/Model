@@ -33,16 +33,19 @@ class GRIM(nn.Module):
             w_alpha=config.w_alpha,
         )
         self.history_embedder = HistoryEmbedder(config.D, config.D_h)
+        self.generation = GenerationHead(config.D, self.tokenizer)
         self.flow_field = EnergyVectorField(
             dim=config.D,
             hidden=config.flow_hidden,
             history_dim=config.D_h,
+            tokenizer=self.tokenizer,
+            history_getter=lambda: self.history,
+            generation=self.generation,
         )
         # 分類モードのみ ObservationBasis を使用
         # LM モードではトークン埋め込みが観測基底を兼ねる
         if config.task_mode == "classify":
             self.observation = ObservationBasis(config.K, config.D)
-        self.generation = GenerationHead(config.D, self.tokenizer)
         self.meta = MetaParams(beta=config.beta_kl)
         self._history: HistoryBuffer | None = None
 

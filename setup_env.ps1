@@ -32,8 +32,8 @@ Write-Host "Installing CPU PyTorch ..."
 & $py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Installing torchdiffeq, tqdm, numpy, datasets ..."
-& $py -m pip install torchdiffeq tqdm numpy datasets huggingface_hub 2>&1 | Out-Host
+Write-Host "Installing torchdiffeq, tqdm, numpy, datasets, gradio ..."
+& $py -m pip install torchdiffeq tqdm numpy datasets huggingface_hub gradio 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $ErrorActionPreference = "Stop"
