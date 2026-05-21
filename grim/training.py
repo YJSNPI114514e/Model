@@ -194,10 +194,10 @@ def train_epoch(
         # sekkeisyo: history_buffer.push(psi_T.detach())
         #            then decay all weights
         with torch.no_grad():
-            # Push batch mean state (or first element for single-sample)
-            if psi_T.dim() == 2 and psi_T.shape[0] > 0:
-                model.history.push(psi_T[0])
-            model.history.decay()
+            if model.config.task_mode != "lm":
+                if psi_T.dim() == 2 and psi_T.shape[0] > 0:
+                    model.history.push(psi_T[0])
+                model.history.decay()
 
         # --- K=3: META UPDATE (every k3_interval steps) ---
         # メタ損失: 全体の weighted loss を通して fm_weight/obs_weight に勾配を流す

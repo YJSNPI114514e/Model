@@ -36,9 +36,14 @@ class ComplexTokenizer(nn.Module):
         self.w_phi = nn.Parameter(torch.tensor(1.0))
         self.b_phi = nn.Parameter(torch.tensor(0.0))
 
-        # Unitary transition matrix parameters
-        self.raw_A = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
-        self.raw_B = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        # 固有値（複素数）の実部と虚部
+        # 数値安定性のため、eigvals_re は負にバイアスする初期化
+        self.eigvals_re = nn.Parameter(-0.1 + 0.02 * torch.randn(dim))
+        self.eigvals_im = nn.Parameter(torch.zeros(dim))
+
+        # 固有ベクトル行列 U の実部と虚部（ユニタリではない非正規行列を許容）
+        self.U_re = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        self.U_im = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
 
     @property
     def embeddings(self) -> Tensor:
@@ -53,6 +58,24 @@ class ComplexTokenizer(nn.Module):
         """|e_t⟩ for each token [B, L, D]"""
         return self.embeddings[token_ids]
 
+    def _get_T_power(self, j: int | float) -> Tensor:
+        """
+        指定された j に対する T^j ∈ C^{D×D} を返す。
+        T = U diag(λ_1,...,λ_D) U^{-1}
+        T^j = U diag(λ_1^j,...,λ_D^j) U^{-1}
+        """
+        # 固有値 λ_k = exp(eigvals_re[k] + i * eigvals_im[k])
+        # 指数関数を通すことで安定化し、λ^j = exp(j * (eigvals_re + i*eigvals_im)) で計算
+        lambda_pow = torch.exp(
+            j * torch.complex(self.eigvals_re, self.eigvals_im)
+        )  # [D]
+
+        U = torch.complex(self.U_re, self.U_im)  # [D, D]
+        U_inv = torch.linalg.inv(U)
+
+        # T^j = U @ diag(λ^j) @ U_inv
+        return U @ (lambda_pow.unsqueeze(-1) * U_inv)
+
     def forward(self, token_ids: Tensor, mask: Tensor | None = None) -> Tensor:
         """
         token_ids: [B, L]
@@ -61,17 +84,19 @@ class ComplexTokenizer(nn.Module):
         emb = self.token_states(token_ids)
         B, L, D = emb.shape
 
-        # Construct skew-Hermitian matrix X = A + iB
-        A_mat = self.raw_A - self.raw_A.T
-        B_mat = self.raw_B + self.raw_B.T
-        X = torch.complex(A_mat, B_mat)
-
         # Positions: j = 0, ..., L-1
-        j = torch.arange(L, dtype=self.raw_A.dtype, device=token_ids.device).view(L, 1, 1)
-        X_all = j * X  # [L, D, D]
+        j_indices = torch.arange(L, dtype=self.U_re.dtype, device=token_ids.device)
 
-        # T^j = exp(j * X)
-        T_all = torch.linalg.matrix_exp(X_all)  # [L, D, D]
+        # Lambda_pow = exp(j * (eigvals_re + i * eigvals_im))
+        lambda_pow_all = torch.exp(
+            j_indices.unsqueeze(-1) * torch.complex(self.eigvals_re, self.eigvals_im).unsqueeze(0)
+        )  # [L, D]
+
+        U = torch.complex(self.U_re, self.U_im)  # [D, D]
+        U_inv = torch.linalg.inv(U)
+
+        # T^j = U @ diag(λ^j) @ U_inv
+        T_all = U.unsqueeze(0) @ (lambda_pow_all.unsqueeze(-1) * U_inv.unsqueeze(0))  # [L, D, D]
 
         # Apply T^j to emb
         rotated = torch.einsum("lxy,bly->blx", T_all, emb)  # [B, L, D]
