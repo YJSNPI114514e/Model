@@ -149,7 +149,8 @@ def train_epoch(
         k2_optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
             out = model.forward_train_batch(x, y, mask)
-            loss = out["loss"]
+            # Flow Matching 損失を無効化し、total_loss = obs_loss のみとする
+            loss = out["loss_obs"]
         if not torch.isfinite(loss):
             global_step += 1
             continue
@@ -214,7 +215,7 @@ def train_epoch(
 
         global_step += 1
         total_loss += loss.item()
-        total_fm += out["loss_fm"].item()
+        total_fm += 0.0  # Flow Matching 損失を無効化
         total_obs += out["loss_obs"].item()
         n_batches += 1
 
@@ -276,7 +277,7 @@ def train(
                 f"train_acc={avg_train_acc:.6f}  "
                 f"val_token_acc={acc:.6f}  val_ppl~{ppl:.2f}  "
                 f"P(y_true)={avg_p_true:.6f} (random={random_p:.6f})  "
-                f"fm_w={meta_w['fm_weight']:.3f}  obs_w={meta_w['obs_weight']:.3f}"
+                f"fm_w=0.000  obs_w={meta_w['obs_weight']:.3f}"
             )
             metric = acc
         else:
