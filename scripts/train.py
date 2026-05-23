@@ -73,6 +73,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-natural-grad", action="store_true")
     p.add_argument("--fast", action="store_true", help="小型モデル（高速プリセット）")
     p.add_argument("--amp", action="store_true", help="GPU 混合精度（cuda 時のみ）")
+    p.add_argument("--bf16", action="store_true", help="BF16 精度（Ampere 以降 GPU で高速）")
+    p.add_argument("--grad-accum", type=int, default=1, help="勾配累積ステップ数（実質バッチサイズ拡大）")
+    p.add_argument("--workers", type=int, default=0, help="データローダーワーカー数（0=メインプロセス）")
+    p.add_argument("--prefetch", type=int, default=None, help="データローダープリフェッチ係数")
+    p.add_argument("--pin-memory", action="store_true", help="ピンメモリの強制有効化")
+    p.add_argument("--no-pin-memory", action="store_true", help="ピンメモリの無効化")
+    p.add_argument("--compile", action="store_true", help="torch.compile でモデル最適化（PyTorch 2.0+）")
     p.add_argument("--resume", action="store_true", help="既存のチェックポイントから再開")
     return p.parse_args()
 
@@ -200,11 +207,27 @@ def _main(args: argparse.Namespace) -> None:
         config.use_natural_grad = False
 
     use_cuda = device_name.startswith("cuda")
+    
+    # ピンメモリ設定の決定
+    pin_memory = use_cuda
+    if args.pin_memory:
+        pin_memory = True
+    if args.no_pin_memory:
+        pin_memory = False
+    
+    # データローダーの高速化設定
+    num_workers = args.workers
+    prefetch_factor = args.prefetch
+    if num_workers > 0 and prefetch_factor is None:
+        prefetch_factor = 2  # デフォルト値
+    
     train_loader, val_loader, vocab = get_lm_loaders(
         corpus,
         seq_len=config.seq_len,
         batch_size=config.batch_size,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
     )
     config.V = max(config.V, vocab.size)
 
@@ -216,8 +239,16 @@ def _main(args: argparse.Namespace) -> None:
     src = args.dataset or corpus.source
     print(
         f"NLP/LM  source={src}  vocab={vocab.size}  seq_len={config.seq_len}  D={config.D}  "
-        f"ode={config.ode_solver}  natural_grad={config.use_natural_grad}  fast={args.fast}  amp={args.amp and use_cuda}"
+        f"ode={config.ode_solver}  natural_grad={config.use_natural_grad}  fast={args.fast}  "
+        f"amp={args.amp and use_cuda}  bf16={args.bf16 and use_cuda}  "
+        f"grad_accum={args.grad_accum}  workers={num_workers}  compile={args.compile}"
     )
+    
+    # torch.compile によるモデル最適化（PyTorch 2.0+）
+    if args.compile:
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+    
     payload_extra = {"dataset": args.dataset, "data": args.data, "corpus_source": corpus.source}
     from grim.training import train
     train(
@@ -229,6 +260,8 @@ def _main(args: argparse.Namespace) -> None:
         vocab=vocab,
         extra_ckpt=payload_extra,
         use_amp=args.amp and use_cuda,
+        use_bf16=args.bf16 and use_cuda,
+        grad_accum_steps=args.grad_accum,
     )
 
 

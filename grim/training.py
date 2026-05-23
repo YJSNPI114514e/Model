@@ -118,6 +118,8 @@ def train_epoch(
     kfac: KFACNaturalGradient | None,
     global_step: int,
     use_amp: bool = False,
+    use_bf16: bool = False,
+    grad_accum_steps: int = 1,
 ) -> tuple[float, float, float, float, int]:
     model.train()
     total_loss = 0.0
@@ -126,12 +128,19 @@ def train_epoch(
     train_acc_sum = 0
     train_acc_total = 0
     n_batches = 0
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    
+    # AMP スケーラー（FP16 のみ。BF16 は不要）
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and not use_bf16)
 
     # sekkeisyo: K2 params only for gradient clipping
     k2_params = _collect_k2_params(model)
 
-    for batch in tqdm(loader, desc="train", leave=False):
+    # 勾配累積用のゼロクリア初期化
+    k2_optimizer.zero_grad(set_to_none=True)
+    if (global_step + 1) % config.k3_interval == 0:
+        k3_optimizer.zero_grad(set_to_none=True)
+
+    for batch_idx, batch in enumerate(tqdm(loader, desc="train", leave=False)):
         if len(batch) == 3:
             x, y, mask = batch
         else:
@@ -142,30 +151,55 @@ def train_epoch(
         if mask is not None:
             mask = mask.to(device, non_blocking=True)
 
-        do_meta = (global_step + 1) % config.k3_interval == 0
+        do_meta = ((global_step + 1) % config.k3_interval == 0) and (batch_idx % grad_accum_steps == 0)
 
         # --- K=2: NATURAL GRADIENT UPDATE ---
         # sekkeisyo: K2_optimizer updates K2 params only
-        k2_optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        # 勾配累積：grad_accum_steps > 1 の場合、zero_grad を呼ばない
+        
+        # 精度に応じた autocast コンテキスト
+        if use_bf16:
+            dtype = torch.bfloat16
+        elif use_amp:
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+            
+        with torch.amp.autocast("cuda", enabled=(use_amp or use_bf16), dtype=dtype):
             out = model.forward_train_batch(x, y, mask)
             # Flow Matching 損失を無効化し、total_loss = obs_loss のみとする
             loss = out["loss_obs"]
-        if not torch.isfinite(loss):
+        
+        # 勾配累積のためのスケーリング
+        loss_scaled = loss / grad_accum_steps
+        
+        if not torch.isfinite(loss_scaled):
             global_step += 1
             continue
 
-        if use_amp:
-            scaler.scale(loss).backward(retain_graph=do_meta)
+        if use_amp and not use_bf16:
+            scaler.scale(loss_scaled).backward(retain_graph=do_meta)
         else:
-            loss.backward(retain_graph=do_meta)
+            loss_scaled.backward(retain_graph=do_meta)
 
-        # sekkeisyo: KFAC preconditions K2 params ONLY (not meta)
-        if kfac is not None and config.use_natural_grad:
-            kfac.precondition(iter(k2_params))
+        # 勾配累積：grad_accum_steps ステップに一度だけ更新
+        if (batch_idx + 1) % grad_accum_steps == 0 or batch_idx == len(loader) - 1:
+            # sekkeisyo: KFAC preconditions K2 params ONLY (not meta)
+            if kfac is not None and config.use_natural_grad:
+                kfac.precondition(iter(k2_params))
 
-        if use_amp:
-            scaler.unscale_(k2_optimizer)
+            if use_amp and not use_bf16:
+                scaler.unscale_(k2_optimizer)
+            # sekkeisyo: clip K2 params only
+            torch.nn.utils.clip_grad_norm_(k2_params, config.grad_clip)
+            if use_amp and not use_bf16:
+                scaler.step(k2_optimizer)
+                scaler.update()
+            else:
+                k2_optimizer.step()
+            
+            # 次のバッチのためにゼロクリア
+            k2_optimizer.zero_grad(set_to_none=True)
         # sekkeisyo: clip K2 params only
         torch.nn.utils.clip_grad_norm_(k2_params, config.grad_clip)
         if use_amp:
@@ -233,6 +267,8 @@ def train(
     vocab: CharVocab | None = None,
     extra_ckpt: dict | None = None,
     use_amp: bool = False,
+    use_bf16: bool = False,
+    grad_accum_steps: int = 1,
 ) -> GRIM:
     device = torch.device(config.device)
     if config.device.startswith("cuda") and not torch.cuda.is_available():
@@ -241,9 +277,15 @@ def train(
         )
     model.to(device)
     model.init_history()
-    if use_amp and not device.type == "cuda":
+    
+    # AMP と BF16 の排他制御
+    if use_bf16 and device.type == "cuda":
+        use_amp = False  # BF16 を優先
+        print("Using BF16 precision (Ampere+ GPUs)")
+    elif use_amp and device.type != "cuda":
         use_amp = False
-
+        use_bf16 = False
+    
     # sekkeisyo VIOLATION 2: Split into K2 and K3 optimizers
     k2_params = _collect_k2_params(model)
     k3_params = _collect_k3_params(model)
@@ -266,7 +308,8 @@ def train(
     for epoch in range(1, config.epochs + 1):
         avg_loss, avg_fm, avg_obs, avg_train_acc, global_step = train_epoch(
             model, train_loader, k2_optimizer, k3_optimizer,
-            device, config, kfac, global_step, use_amp=use_amp,
+            device, config, kfac, global_step, 
+            use_amp=use_amp, use_bf16=use_bf16, grad_accum_steps=grad_accum_steps,
         )
         if config.task_mode == "lm":
             acc, ppl, avg_p_true = evaluate_lm(model, val_loader, device)
