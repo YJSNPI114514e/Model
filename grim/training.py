@@ -292,8 +292,16 @@ def train(
 
     # sekkeisyo: K2 uses Natural Gradient (KFAC approximation)
     k2_optimizer = torch.optim.Adam(k2_params, lr=config.lr)
+    
     # sekkeisyo: K3 uses separate Meta Gradient optimizer
-    k3_optimizer = torch.optim.Adam(k3_params, lr=config.meta_lr)
+    # K3 parameters might be empty if meta module has no trainable params
+    if k3_params:
+        k3_optimizer = torch.optim.Adam(k3_params, lr=config.meta_lr)
+    else:
+        # Create a dummy optimizer that does nothing
+        k3_optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=config.meta_lr)
+        # Remove the dummy parameter from the optimizer's param_groups to avoid updating it
+        k3_optimizer.param_groups[0]['params'] = []
 
     kfac = None
     if config.use_natural_grad:
