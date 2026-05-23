@@ -147,6 +147,7 @@ def get_lm_loaders(
     val_ratio: float = 0.3,
     pin_memory: bool = False,
     num_workers: int = 0,
+    prefetch_factor: int | None = None,
 ) -> tuple[DataLoader, DataLoader, CharVocab]:
     token_ids = corpus.token_ids
     n = len(token_ids)
@@ -163,6 +164,8 @@ def get_lm_loaders(
     val_ds = LanguageModelDataset(val_ids, corpus.vocab, seq_len)
     
     kw = {"num_workers": num_workers, "pin_memory": pin_memory}
+    if prefetch_factor is not None and num_workers > 0:
+        kw["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **kw)
     return train_loader, val_loader, corpus.vocab
