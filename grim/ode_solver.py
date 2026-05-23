@@ -26,6 +26,7 @@ def integrate_flow(
     method: str = "dopri5",
     rtol: float = 1e-4,
     atol: float = 1e-6,
+    use_amp: bool = False,
 ) -> Tensor:
     """
     sekkeisyo COMPONENT 3:
@@ -33,15 +34,16 @@ def integrate_flow(
     2. t_span = [0.0, 1.0]
     3. psi_T = odeint(rhs, psi_0, t_span, method='dopri5', rtol=1e-4, atol=1e-6)[-1]
     4. ASSERT torch.allclose(norm(psi_T), 1.0, atol=1e-5)
+    
+    use_amp: True の場合、BF16/FP16 で計算（GPU 時のみ有効）。False は FP32 固定。
     """
     psi0 = normalize_state(psi0)
     B, D = psi0.shape
     y0 = _to_real_flat(psi0)
 
     def dynamics(t_scalar, y_flat):
-        # AMP autocast を無効化して常に float32 で計算
-        # DOPRI5 の適応ステップ幅制御は float16 では不安定
-        with torch.amp.autocast("cuda", enabled=False):
+        # use_amp=True なら混合精度、False なら FP32 固定
+        with torch.amp.autocast("cuda", enabled=use_amp):
             psi = _from_real_flat(y_flat, (B, D))
             psi = normalize_state(psi)
             ts = t_scalar.item() if isinstance(t_scalar, torch.Tensor) else float(t_scalar)

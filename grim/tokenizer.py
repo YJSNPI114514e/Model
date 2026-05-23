@@ -1,4 +1,4 @@
-"""複素RKHSトークナイザー（第2.2節）。"""
+"""複素 RKHS トークナイザー（第 2.2 節）。状態空間モデル (SSM) 版。"""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from grim.geometry import complex_inner, normalize_state
 
 class ComplexTokenizer(nn.Module):
     """
-    |ψ₀⟩ = Z^{-1/2} Σ_j α_j e^{iφ_j} T^j |e_{t_j}⟩
-    α_j = softmax(w_α · Re(T^j |e_{t_j}⟩))
+    |ψ₀⟩ = Z^{-1/2} Σ_j α_j e^{iφ_j} · |ψ_j⟩
+    ここで |ψ_j⟩ = Â_j |ψ_{j-1}⟩ + B̂_j |e_j⟩
+    Â_j: 選択的ユニタリ遷移作用素（入力依存）
+    B̂_j: 選択的入力作用素
     """
 
     def __init__(
@@ -31,20 +33,28 @@ class ComplexTokenizer(nn.Module):
         self.max_len = max_len
         self.w_alpha = w_alpha
 
+        # トークン埋め込み
         self.emb_re = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
         self.emb_im = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
 
+        # 位相パラメータ
         self.w_phi = nn.Parameter(torch.tensor(1.0))
         self.b_phi = nn.Parameter(torch.tensor(0.0))
 
-        # 固有値（複素数）の実部と虚部
-        # 数値安定性のため、eigvals_re は負にバイアスする初期化
-        self.eigvals_re = nn.Parameter(-0.1 + 0.02 * torch.randn(dim))
-        self.eigvals_im = nn.Parameter(torch.zeros(dim))
+        # SSM パラメータ：基底遷移行列 A_base (歪エルミート化用)
+        self.A_base_re = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        self.A_base_im = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
 
-        # 固有ベクトル行列 U の実部と虚部（ユニタリではない非正規行列を許容）
-        self.U_re = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
-        self.U_im = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        # SSM パラメータ：入力作用素 B
+        self.B_re = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+        self.B_im = nn.Parameter(torch.randn(dim, dim) / math.sqrt(dim))
+
+        # SSM パラメータ：状態依存補正の射影ベクトル delta_raw
+        self.delta_proj_re = nn.Parameter(torch.randn(dim, 1) / math.sqrt(dim))
+        self.delta_proj_im = nn.Parameter(torch.randn(dim, 1) / math.sqrt(dim))
+
+        # 注意重み用
+        self.omega_attn = nn.Parameter(torch.randn(dim) / math.sqrt(dim))
 
     @property
     def embeddings(self) -> Tensor:
@@ -59,34 +69,49 @@ class ComplexTokenizer(nn.Module):
         """|e_t⟩ for each token [B, L, D]"""
         return self.embeddings[token_ids]
 
-    def _build_unitary_U(self) -> Tensor:
+    def _build_skew_hermitian(self, X_re: Tensor, X_im: Tensor) -> Tensor:
         """
-        U_re, U_im から複素行列を組み立て、QR分解でユニタリ化した Q を返す。
-        Q†Q = I が保証されるため、逆行列は共役転置 Q.conj().T で代替可能。
-        torch.linalg.qr は微分可能。
+        実部・虚部から複素行列を組み立て、歪エルミート化 (X - X†) する。
+        結果は exp(X) でユニタリ行列になる。
         """
-        U_raw = torch.complex(self.U_re, self.U_im)  # [D, D]
-        Q, _ = torch.linalg.qr(U_raw)               # Q: [D, D] ユニタリ
-        return Q
+        X = torch.complex(X_re, X_im)
+        if X.dim() == 3:
+            X_dagger = X.conj().transpose(-2, -1)
+        else:
+            X_dagger = X.conj().T
+        return X - X_dagger
 
-    def _get_T_power(self, j: int | float) -> Tensor:
+    def _compute_selective_unitary(self, psi_prev: Tensor) -> Tensor:
         """
-        指定された j に対する T^j ∈ C^{D×D} を返す。
-        T = U diag(λ_1,...,λ_D) U†  （U はユニタリ）
-        T^j = U diag(λ_1^j,...,λ_D^j) U†
+        状態 ψ_prev に基づいて選択的ユニタリ作用素 Â_j を計算する。
+        Â_j = exp(X_base + gate * delta)
         """
-        # [修正2] 固有値実部を -softplus で常に負値に強制（発散防止）
-        lambda_real = -F.softplus(self.eigvals_re) - 1e-6  # 常に < 0
-        lambda_pow = torch.exp(
-            j * torch.complex(lambda_real, self.eigvals_im)
-        )  # [D]
+        B = psi_prev.shape[0]
+        D = self.dim
 
-        # [修正1] QR分解でユニタリ化。逆行列は共役転置で代替
-        Q = self._build_unitary_U()  # [D, D]
-        Q_inv = Q.conj().T           # [D, D]
+        # 基底歪エルミート行列
+        X_base = self._build_skew_hermitian(self.A_base_re, self.A_base_im)
 
-        # T^j = Q @ diag(λ^j) @ Q†
-        return Q @ (lambda_pow.unsqueeze(-1) * Q_inv)
+        # 状態依存スコア：score = |⟨ψ_prev|delta_raw⟩|^2
+        delta_raw = torch.complex(self.delta_proj_re, self.delta_proj_im)  # [D, 1]
+        # ⟨ψ|δ⟩ = ψ^H · δ  [B, D] @ [D, 1] -> [B, 1]
+        inner_prod = torch.matmul(psi_prev.conj(), delta_raw).squeeze(-1)  # [B]
+        score = torch.abs(inner_prod) ** 2
+
+        # ゲート：sigmoid(score - 0.5) → [0, 1]
+        gate = torch.sigmoid(score - 0.5)
+
+        # 状態依存補正項 delta (歪エルミート)
+        delta_raw_matrix = delta_raw @ delta_raw.conj().T  # [D, D] (PSD, エルミート)
+        delta = self._build_skew_hermitian(delta_raw_matrix.real, delta_raw_matrix.imag)
+
+        # X_j = X_base + gate * delta
+        X_j = X_base.unsqueeze(0) + gate.view(B, 1, 1) * delta.unsqueeze(0)
+
+        # 行列指数関数でユニタリ行列に
+        A_j = torch.matrix_exp(X_j)
+
+        return A_j
 
     def forward(self, token_ids: Tensor, mask: Tensor | None = None) -> Tensor:
         """
@@ -95,44 +120,46 @@ class ComplexTokenizer(nn.Module):
         """
         emb = self.token_states(token_ids)
         B, L, D = emb.shape
+        device = token_ids.device
 
-        # Positions: j = 0, ..., L-1
-        j_indices = torch.arange(L, dtype=self.U_re.dtype, device=token_ids.device)
+        # 入力作用素 B_mat
+        B_mat = torch.complex(self.B_re, self.B_im)
 
-        # [修正2] 固有値実部を -softplus で常に負値に強制（j が大きくなっても発散しない）
-        lambda_real = -F.softplus(self.eigvals_re) - 1e-6  # [D]、常に < 0
-        # Lambda_pow[j, k] = exp(j * (lambda_real[k] + i * eigvals_im[k]))
-        lambda_pow_all = torch.exp(
-            j_indices.unsqueeze(-1) * torch.complex(lambda_real, self.eigvals_im).unsqueeze(0)
-        )  # [L, D]
+        # 状態空間モデルによる逐次的な文脈蓄積
+        psi = torch.zeros(B, D, dtype=torch.complex64, device=device)
+        psi_states = []
 
-        # [修正1] QR分解でユニタリ化。U_inv = Q† = Q.conj().T（逆行列計算不要）
-        Q = self._build_unitary_U()   # [D, D]
-        Q_inv = Q.conj().T            # [D, D]
+        for j in range(L):
+            e_j = emb[:, j, :]
 
-        # T^j = Q @ diag(Λ^j) @ Q†
-        T_all = Q.unsqueeze(0) @ (lambda_pow_all.unsqueeze(-1) * Q_inv.unsqueeze(0))  # [L, D, D]
+            # 選択的遷移作用素の計算
+            A_j = self._compute_selective_unitary(psi)
 
-        # Apply T^j to emb
-        rotated = torch.einsum("lxy,bly->blx", T_all, emb)  # [B, L, D]
+            # 状態遷移：|ψ_j⟩ = Â_j |ψ_{j-1}⟩ + B̂ |e_j⟩
+            psi = torch.einsum('bxy,by->bx', A_j, psi) + torch.einsum('xy,by->bx', B_mat, e_j)
+            psi_states.append(psi)
 
-        # Apply phase rotation
-        pos = torch.arange(L, device=token_ids.device).view(1, L).expand(B, L)
-        phase = self.phase(pos)
-        rotated = rotated * torch.exp(1j * phase).unsqueeze(-1)
+        psi_states = torch.stack(psi_states, dim=1)
 
-        scores = self.w_alpha * rotated.real.sum(dim=-1)
+        # 位相と注意重み
+        pos = torch.arange(L, device=device).view(1, L).expand(B, L)
+        phi = self.phase(pos)
+        
+        scores = torch.einsum('d,bld->bl', self.omega_attn, psi_states.real)
         if mask is not None:
             scores = scores.masked_fill(~mask, float("-inf"))
         alpha = torch.softmax(scores, dim=-1)
 
-        psi = torch.sum(alpha.unsqueeze(-1) * rotated, dim=1)
-        z = torch.sum(torch.abs(alpha) ** 2, dim=-1, keepdim=True).clamp_min(1e-8)
-        psi = psi / torch.sqrt(z)
-        return normalize_state(psi)
+        # 重ね合わせ：|ψ₀⟩ = Σ_j α_j e^{iφ_j} |ψ_j⟩
+        psi_0 = torch.sum(
+            alpha.unsqueeze(-1) * torch.exp(1j * phi.unsqueeze(-1)) * psi_states,
+            dim=1
+        )
+
+        return normalize_state(psi_0)
 
     def inject(self, psi: Tensor, token_id: Tensor) -> Tensor:
-        """生成時: 新トークンを状態に重ねる簡易注入"""
+        """生成時：新トークンを状態に重ねる簡易注入"""
         if token_id.dim() == 0:
             token_id = token_id.view(1)
         emb = self.embeddings[token_id]
@@ -140,3 +167,28 @@ class ComplexTokenizer(nn.Module):
             emb = emb.unsqueeze(0)
         mixed = psi + 0.5 * emb
         return normalize_state(mixed)
+
+    def verify_unitarity(self, batch_size: int = 4) -> dict:
+        """
+        Â_j のユニタリ性を検証する。
+        戻り値：{max_error, mean_error, is_unitary}
+        """
+        device = next(self.parameters()).device
+        dummy_psi = torch.randn(batch_size, self.dim, dtype=torch.complex64, device=device)
+        
+        A_j = self._compute_selective_unitary(dummy_psi)
+        
+        # A_j^† @ A_j が単位行列に近いか確認
+        A_j_dagger = A_j.conj().transpose(-2, -1)
+        identity = torch.eye(self.dim, dtype=torch.complex64, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+        product = torch.einsum('bxy,byz->bxz', A_j_dagger, A_j)
+        
+        error = torch.abs(product - identity)
+        max_error = error.max().item()
+        mean_error = error.mean().item()
+        
+        return {
+            "max_error": max_error,
+            "mean_error": mean_error,
+            "is_unitary": max_error < 1e-4
+        }

@@ -103,7 +103,7 @@ class EnergyVectorField(nn.Module):
         # 勾配: d/dpsi* (-log(|<p|p0>|^2)) = -p0 / <p|p0>
         # |<p|p0>|^2 = <p|p0><p0|p>
         # d/dp* log(<p|p0><p0|p>) = p0 * <p0|p> / |<p|p0>|^2 = p0 * overlap.conj() / overlap_sq
-        grad_world = -overlap.conj() / (overlap_sq.clamp_min(eps_w)) * psi0
+        grad_world = (-overlap.conj() / (overlap_sq.clamp_min(eps_w))).unsqueeze(-1) * psi0
 
         # --- 2. E_self: 自己無撞着性 ---
         # E_self = lam * ||psi||^2
