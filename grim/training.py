@@ -39,7 +39,7 @@ def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[
                 mask = mask.to(device)
             psi0 = model.tokenize(x, mask)
             h_emb = model.summarize_history(x.shape[0])
-            psi_T = model.integrate(psi0, h_emb)
+            psi_T = model.integrate(psi0, h_emb, use_amp=False)
 
             # Born Rule 確率
             probs = model.generation.born_probs(psi_T)  # [B, V]
