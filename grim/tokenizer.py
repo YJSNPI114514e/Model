@@ -6,6 +6,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from grim.geometry import complex_inner, normalize_state
@@ -58,23 +59,34 @@ class ComplexTokenizer(nn.Module):
         """|e_t⟩ for each token [B, L, D]"""
         return self.embeddings[token_ids]
 
+    def _build_unitary_U(self) -> Tensor:
+        """
+        U_re, U_im から複素行列を組み立て、QR分解でユニタリ化した Q を返す。
+        Q†Q = I が保証されるため、逆行列は共役転置 Q.conj().T で代替可能。
+        torch.linalg.qr は微分可能。
+        """
+        U_raw = torch.complex(self.U_re, self.U_im)  # [D, D]
+        Q, _ = torch.linalg.qr(U_raw)               # Q: [D, D] ユニタリ
+        return Q
+
     def _get_T_power(self, j: int | float) -> Tensor:
         """
         指定された j に対する T^j ∈ C^{D×D} を返す。
-        T = U diag(λ_1,...,λ_D) U^{-1}
-        T^j = U diag(λ_1^j,...,λ_D^j) U^{-1}
+        T = U diag(λ_1,...,λ_D) U†  （U はユニタリ）
+        T^j = U diag(λ_1^j,...,λ_D^j) U†
         """
-        # 固有値 λ_k = exp(eigvals_re[k] + i * eigvals_im[k])
-        # 指数関数を通すことで安定化し、λ^j = exp(j * (eigvals_re + i*eigvals_im)) で計算
+        # [修正2] 固有値実部を -softplus で常に負値に強制（発散防止）
+        lambda_real = -F.softplus(self.eigvals_re) - 1e-6  # 常に < 0
         lambda_pow = torch.exp(
-            j * torch.complex(self.eigvals_re, self.eigvals_im)
+            j * torch.complex(lambda_real, self.eigvals_im)
         )  # [D]
 
-        U = torch.complex(self.U_re, self.U_im)  # [D, D]
-        U_inv = torch.linalg.inv(U)
+        # [修正1] QR分解でユニタリ化。逆行列は共役転置で代替
+        Q = self._build_unitary_U()  # [D, D]
+        Q_inv = Q.conj().T           # [D, D]
 
-        # T^j = U @ diag(λ^j) @ U_inv
-        return U @ (lambda_pow.unsqueeze(-1) * U_inv)
+        # T^j = Q @ diag(λ^j) @ Q†
+        return Q @ (lambda_pow.unsqueeze(-1) * Q_inv)
 
     def forward(self, token_ids: Tensor, mask: Tensor | None = None) -> Tensor:
         """
@@ -87,16 +99,19 @@ class ComplexTokenizer(nn.Module):
         # Positions: j = 0, ..., L-1
         j_indices = torch.arange(L, dtype=self.U_re.dtype, device=token_ids.device)
 
-        # Lambda_pow = exp(j * (eigvals_re + i * eigvals_im))
+        # [修正2] 固有値実部を -softplus で常に負値に強制（j が大きくなっても発散しない）
+        lambda_real = -F.softplus(self.eigvals_re) - 1e-6  # [D]、常に < 0
+        # Lambda_pow[j, k] = exp(j * (lambda_real[k] + i * eigvals_im[k]))
         lambda_pow_all = torch.exp(
-            j_indices.unsqueeze(-1) * torch.complex(self.eigvals_re, self.eigvals_im).unsqueeze(0)
+            j_indices.unsqueeze(-1) * torch.complex(lambda_real, self.eigvals_im).unsqueeze(0)
         )  # [L, D]
 
-        U = torch.complex(self.U_re, self.U_im)  # [D, D]
-        U_inv = torch.linalg.inv(U)
+        # [修正1] QR分解でユニタリ化。U_inv = Q† = Q.conj().T（逆行列計算不要）
+        Q = self._build_unitary_U()   # [D, D]
+        Q_inv = Q.conj().T            # [D, D]
 
-        # T^j = U @ diag(λ^j) @ U_inv
-        T_all = U.unsqueeze(0) @ (lambda_pow_all.unsqueeze(-1) * U_inv.unsqueeze(0))  # [L, D, D]
+        # T^j = Q @ diag(Λ^j) @ Q†
+        T_all = Q.unsqueeze(0) @ (lambda_pow_all.unsqueeze(-1) * Q_inv.unsqueeze(0))  # [L, D, D]
 
         # Apply T^j to emb
         rotated = torch.einsum("lxy,bly->blx", T_all, emb)  # [B, L, D]
