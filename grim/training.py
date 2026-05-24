@@ -89,7 +89,7 @@ def _evaluate_val_loss(
         # Restore history
         model.history.clear()
         for e in saved_history:
-            model.history._entries.append(e)
+            model.history.short_term.append(e)
     
     avg_loss = total_loss / max(total_samples, 1)
     
