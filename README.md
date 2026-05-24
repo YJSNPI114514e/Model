@@ -1,4 +1,4 @@
-# GRIM-NLP: Geometric RKHS Integrative Model for Natural Language Processing
+# GRIM-NLP(仮称)　
 
 ## 概要
 
@@ -6,7 +6,7 @@ GRIM (Geometric RKHS Integrative Model) は、複素射影ヒルベルト空間 
 
 ---
 
-## NumPy 版実装状況（2025 年更新）
+## NumPy 版実装状況（2026 年更新）
 
 ### ✅ NumPy 移行済みファイル（推論・生成専用）
 
