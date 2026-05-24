@@ -6,53 +6,41 @@ GRIM (Geometric RKHS Integrative Model) は、複素射影ヒルベルト空間 
 
 ---
 
-## NumPy 版実装状況（2026 年更新）
+## 実装状況（2026 年更新）
 
-### ✅ NumPy 移行済みファイル（推論・生成専用）
+### ✅ 実装済みコアモジュール
 
 | ファイル | 内容 | 用途 |
 |---------|------|------|
-| `grim/geometry_np.py` | 複素内積、FS 距離、正規化、接空間射影 | 幾何学演算 |
-| `grim/tokenizer_np.py` | `NumPyTokenizer` クラス | トークン埋め込み・状態構成 |
-| `grim/flow_field_np.py` | `NumPyEnergyField` クラス | エネルギー関数と勾配 |
-| `grim/ode_solver_np.py` | `integrate_flow` 関数 | scipy.integrate.solve_ivp 使用 |
-| `grim/observation_np.py` | `born_probs` 関数 | ボルン則による確率計算 |
-| `grim/history_np.py` | `NumPyHistory` クラス | 階層的履歴バッファ |
-| `grim/model_np.py` | `NumPyGRIM` クラス | 推論・生成専用モデル |
+| `grim/geometry.py` | 複素内積、FS 距離、正規化、測地線補間 | 幾何学演算 |
+| `grim/tokenizer.py` | `ComplexTokenizer` クラス | トークン埋め込み・初期状態構成 |
+| `grim/flow_field.py` | `EnergyVectorField` クラス | エネルギー関数と勾配計算 |
+| `grim/ode_solver.py` | `integrate_flow` 関数 | scipy.integrate.odeint 使用 (DOPRI5) |
+| `grim/observation.py` | `GenerationHead` クラス | ボルン則による確率計算 |
+| `grim/history.py` | `HistoryBuffer` クラス | 階層的履歴バッファ |
+| `grim/model.py` | `GRIM` クラス | 統合モデル（推論・訓練） |
+| `grim/training.py` | 訓練ループ | KFAC 自然勾配・メタ学習対応 |
+| `grim/natural_grad.py` | `KFACNaturalGradient` クラス | 自然勾配最適化 |
+| `grim/meta.py` | `MetaParams` クラス | メタパラメータ管理 |
+| `grim/k3_meta_learner.py` | K3 メタ学習機能 | メタ学習制御 |
+| `grim/config.py` | `GRIMConfig` クラス | ハイパーパラメータ設定 |
 
 **特徴:**
-- 依存：numpy, scipy.integrate.solve_ivp のみ
-- dtype：np.complex128（状態）, np.float64（実数パラメータ）
-- 逆伝播（BP）を含まないため、訓練には使用不可
-- 推論・生成のみを対象
+- 依存：PyTorch, scipy.integrate.odeint
+- dtype：torch.complex128（状態）, torch.float64（実数パラメータ）
+- 訓練・推論の両方に対応
+- KFAC 自然勾配による最適化
+- メタ学習（K3 パラメータ）対応
 
 **動作確認:**
 ```bash
-python test_numpy_grim.py
+python verify_grim.py
+python test_all.py
 ```
-
-### ❌ PyTorch 版のままのファイル（訓練用）
-
-| ファイル | 内容 | 後日移行予定 |
-|---------|------|-------------|
-| `grim/training.py` | 訓練ループ（BP 使用） | 未定 |
-| `grim/natural_grad.py` | KFAC 自然勾配 | 未定 |
-| `grim/meta.py` | K=3 メタ学習 | 未定 |
-| `scripts/train.py` | 訓練スクリプト | 未定 |
-| `data/*.py` | DataLoader | PyTorch のまま併用可 |
 
 ---
 
 ## Web UI の使用方法
-
-### NumPy モードでの推論
-
-Web UI の「文章生成」タブで **「NumPy モード (推論のみ)」** チェックボックスをオンにすると、PyTorch ではなく NumPy 版モデルを使用してテキストを生成できます。
-
-**特徴:**
-- 訓練済みチェックポイントからパラメータを読み取り、NumPy 版で推論
-- バックプロパゲーション不使用のため高速
-- 実験的な機能として提供
 
 ### 学習ログの確認
 
