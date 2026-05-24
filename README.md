@@ -30,7 +30,6 @@ GRIM (Geometric RKHS Integrative Model) は、複素射影ヒルベルト空間 
 ```bash
 python test_numpy_grim.py
 ```
-全 7 モジュールのテストに合格しました（2025 年現在）。
 
 ### ❌ PyTorch 版のままのファイル（訓練用）
 
@@ -440,7 +439,7 @@ def precondition(self, params):
 **理論**: 
 $$\mathcal{L}_{\text{total}} = f_{\text{softplus}}(w_{\text{obs}}) \cdot \mathcal{L}_{\text{obs}}$$
 
-Flow Matching 損失は無効化（観測損失のみ使用）
+Flow Matching 損失は無効化
 
 **実装**: `grim/model.py::forward_train_lm()`
 ```python
