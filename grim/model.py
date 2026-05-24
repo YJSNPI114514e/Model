@@ -107,13 +107,34 @@ class GRIM(nn.Module):
 
     def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Tensor:
         """
-        Born Rule: p(k) = |⟨e_k|ψ_T⟩|² (W_proj 廃止済み)
-        scores / scores.sum() で正規化。
+        改良 1: マージン最大化損失（ヒンジ損失 + ボルン則）
+        
+        correct_score = |⟨e_y|ψ_T⟩|²
+        best_wrong_score = max_{k≠y} |⟨e_k|ψ_T⟩|²
+        margin = correct_score - best_wrong_score
+        loss = max(0, 1.0 - margin)  # ヒンジ損失
+        
+        マージンが 1 未満なら罰則、1 以上ならゼロ。
+        εや log は不要。計算が軽くなる。
         """
-        # generation.born_probs は scores/sum(scores) を返す
-        probs = self.generation.born_probs(psi_T)
-        log_probs = torch.log(probs.clamp_min(1e-8))
-        return F.nll_loss(log_probs, target_token_ids)
+        scores = self.generation.token_scores(psi_T)  # [B, V]
+        B = scores.shape[0]
+        
+        # 正解スコア
+        y = target_token_ids
+        correct_score = scores[torch.arange(B, device=scores.device), y]  # [B]
+        
+        # 不正解の最大スコア：正解をマスク
+        mask = torch.ones_like(scores, dtype=torch.bool)
+        mask[torch.arange(B, device=scores.device), y] = False
+        wrong_scores = scores.masked_fill(mask, float('-inf'))
+        best_wrong_score = wrong_scores.max(dim=-1).values  # [B]
+        
+        # マージンとヒンジ損失
+        margin = correct_score - best_wrong_score
+        loss = torch.clamp(1.0 - margin, min=0.0)  # max(0, 1 - margin)
+        
+        return loss.mean()
 
     def observation_loss(self, psi_T: Tensor, labels: Tensor) -> Tensor:
         probs = self.observation.born_probs(psi_T)
