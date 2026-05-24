@@ -21,7 +21,7 @@ class GRIMConfig:
     history_eps: float = 1e-4
     D_h: int = 128
 
-    # Flow Matching / ODE — DOPRI5 必須 (sekkeisyo VIOLATION 6)
+    ODE — DOPRI5 必須 (sekkeisyo VIOLATION 6)
     flow_hidden: int = 256
     flow_layers: int = 3
     ode_solver: str = "dopri5"          # MUST be dopri5, Euler is FORBIDDEN
