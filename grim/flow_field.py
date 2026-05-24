@@ -210,6 +210,14 @@ class EnergyVectorField(nn.Module):
         # 3. Continuation potential (E_cont)
         history = self.history_getter()
         entries = history._entries if history is not None else []
+        entries = []
+        if history is not None:
+            if hasattr(history, 'short_term'):
+                # HierarchicalHistoryBuffer の場合
+                entries = history.short_term + history.mid_term + history.long_term
+            elif hasattr(history, '_entries'):
+                # 旧 HistoryBuffer との互換性
+                entries = history._entries
         if not entries:
             e_cont = torch.zeros(psi.shape[0], device=psi.device, dtype=psi.real.dtype)
         else:
