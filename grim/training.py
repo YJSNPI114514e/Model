@@ -20,8 +20,10 @@ def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[
     """次トークン精度、パープレキシティ、P(y_true) 平均。"""
     model.eval()
     
-    # Save training history, clear it for evaluation, restore it afterward
-    saved_history = list(model.history._entries)
+    # Save training history by collecting from all layers, clear it for evaluation, restore it afterward
+    saved_history = []
+    for layer in [model.history.short_term, model.history.mid_term, model.history.long_term]:
+        saved_history.extend(list(layer))
     model.history.clear()
     
     correct = total = 0
