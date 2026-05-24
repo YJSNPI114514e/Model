@@ -118,15 +118,23 @@ class TextCorpus:
 
 
 class LanguageModelDataset(Dataset):
-    """文脈 [t_{i}..t_{i+L-1}] → 次トークン t_{i+L}"""
+    """文脈 [t_{i}..t_{i+L-1}] → 次トークン t_{i+L}
+    
+    Returns:
+        (context_ids, target_id, is_doc_start) のタプル。
+        is_doc_start はこのサンプルが文書の先頭かどうかを示すブール値。
+    """
 
-    def __init__(self, text_or_ids: str | list[int], vocab: CharVocab, seq_len: int) -> None:
+    def __init__(self, text_or_ids: str | list[int], vocab: CharVocab, seq_len: int, 
+                 doc_boundaries: list[int] | None = None) -> None:
         if isinstance(text_or_ids, list):
             self.ids = text_or_ids
         else:
             self.ids = vocab.encode(text_or_ids)
         self.vocab = vocab
         self.seq_len = seq_len
+        # 文書境界のインデックスリスト（これらの位置が文書の先頭）
+        self.doc_boundaries = set(doc_boundaries) if doc_boundaries else set()
 
     def __len__(self) -> int:
         return max(0, len(self.ids) - self.seq_len - 1)
@@ -134,9 +142,12 @@ class LanguageModelDataset(Dataset):
     def __getitem__(self, idx: int):
         ctx = self.ids[idx : idx + self.seq_len]
         nxt = self.ids[idx + self.seq_len]
+        # idx が文書境界であれば True
+        is_doc_start = idx in self.doc_boundaries
         return (
             torch.tensor(ctx, dtype=torch.long),
             torch.tensor(nxt, dtype=torch.long),
+            torch.tensor(is_doc_start, dtype=torch.bool),
         )
 
 
@@ -149,6 +160,13 @@ def get_lm_loaders(
     num_workers: int = 0,
     prefetch_factor: int | None = None,
 ) -> tuple[DataLoader, DataLoader, CharVocab]:
+    """学習用・評価用 DataLoader を返す。
+    
+    各バッチは (context_ids, target_ids, is_doc_start) のタプルを含む。
+    is_doc_start はバッチ内の各サンプルが文書先頭かどうかを示す。
+    
+    文書境界は改行文字の直後の位置とする（各行を独立した文書として扱う）。
+    """
     token_ids = corpus.token_ids
     n = len(token_ids)
     if n < seq_len + 2:
@@ -160,8 +178,28 @@ def get_lm_loaders(
     train_ids = token_ids[:n_train_tokens]
     val_ids = token_ids[n_train_tokens:]
     
-    train_ds = LanguageModelDataset(train_ids, corpus.vocab, seq_len)
-    val_ds = LanguageModelDataset(val_ids, corpus.vocab, seq_len)
+    # 文書境界：改行文字 (newline) の直後の位置を文書先頭とする
+    # 各行を独立した文書として扱い、履歴をリセットする
+    newline_id = corpus.vocab.char2id.get('\n', None)
+    
+    if newline_id is not None:
+        # 改行文字の位置を探す
+        newline_positions_train = [i for i, tid in enumerate(train_ids) if tid == newline_id]
+        # 改行の次の位置が文書先頭
+        train_doc_boundaries = [pos + 1 for pos in newline_positions_train if pos + 1 < len(train_ids) - seq_len]
+        
+        newline_positions_val = [i for i, tid in enumerate(val_ids) if tid == newline_id]
+        val_doc_boundaries = [pos + 1 for pos in newline_positions_val if pos + 1 < len(val_ids) - seq_len]
+    else:
+        # 改行文字がない場合は EOS トークンを使用（フォールバック）
+        eos_positions = [i for i, tid in enumerate(train_ids) if tid == corpus.vocab.EOS]
+        train_doc_boundaries = [pos + 1 for pos in eos_positions if pos + 1 < len(train_ids) - seq_len]
+        
+        eos_positions_val = [i for i, tid in enumerate(val_ids) if tid == corpus.vocab.EOS]
+        val_doc_boundaries = [pos + 1 for pos in eos_positions_val if pos + 1 < len(val_ids) - seq_len]
+    
+    train_ds = LanguageModelDataset(train_ids, corpus.vocab, seq_len, doc_boundaries=train_doc_boundaries)
+    val_ds = LanguageModelDataset(val_ids, corpus.vocab, seq_len, doc_boundaries=val_doc_boundaries)
     
     kw = {"num_workers": num_workers, "pin_memory": pin_memory}
     if prefetch_factor is not None and num_workers > 0:

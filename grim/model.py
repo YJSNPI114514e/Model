@@ -273,6 +273,9 @@ class GRIM(nn.Module):
         local_hist: list[Tensor] = []
         forbid = self._forbid_special_ids() if forbid_special else None
         generated: list[int] = []
+        
+        # 生成開始時に履歴をクリア（指示 4: 既存動作維持）
+        self.history.clear()
 
         def h_emb(batch: int = 1) -> Tensor:
             if not local_hist:
