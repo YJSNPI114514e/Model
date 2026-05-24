@@ -113,19 +113,25 @@ class HierarchicalHistoryBuffer:
             age=0
         ))
         
-        # 短期が溢れたら中期へ圧縮
-        if len(self.short_term) > self.max_short:
+        # 短期が溢れたら中期へ圧縮（再帰的に中期もチェック）
+        while len(self.short_term) > self.max_short:
             self._compress_short_to_mid()
-        
-        # 中期が溢れたら長期へ移動
-        if len(self.mid_term) > self.max_mid:
-            self._compress_mid_to_long()
+            # 中期が溢れたら長期へ移動
+            if len(self.mid_term) > self.max_mid:
+                self._compress_mid_to_long()
 
     def _compress_short_to_mid(self) -> None:
         """
         短期層の全エントリから、FS 距離が最も近い 2 つを見つけ、
         測地線中点に統合して中期層に追加する。
+        短期が max_short 以下になるまで繰り返し圧縮する。
         """
+        # 短期が max_short 以下になるまで繰り返す
+        while len(self.short_term) > self.max_short and len(self.short_term) >= 2:
+            self._compress_one_pair()
+    
+    def _compress_one_pair(self) -> None:
+        """短期層から最も近い 1 ペアを圧縮して中期に追加"""
         if len(self.short_term) < 2:
             return
 
@@ -257,7 +263,7 @@ class HierarchicalHistoryBuffer:
             return torch.zeros(batch_size, self.embedder.proj_re.out_features, device=self.device)
         
         psis = torch.stack(all_entries)  # [N, D]
-        weights = torch.tensor(all_weights, device=self.device, dtype=psis.dtype)
+        weights = torch.tensor(all_weights, device=self.device, dtype=torch.float32)  # float32 で softmax
         
         # Softmax 正規化
         weights_norm = torch.softmax(weights, dim=0)
