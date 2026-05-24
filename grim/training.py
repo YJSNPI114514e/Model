@@ -48,13 +48,26 @@ def _evaluate_val_loss(
         with torch.no_grad():
             for batch in loader:
                 if len(batch) == 3:
-                    x, y, mask = batch
+                    # LM モード：(x, y, is_doc_start) の形式
+                    if model.config.task_mode == "lm" and batch[2].dtype == torch.bool:
+                        x, y, is_doc_start = batch
+                        mask = None
+                    else:
+                        x, y, mask = batch
+                        is_doc_start = None
                 else:
                     x, y = batch
                     mask = None
+                    is_doc_start = None
                 x, y = x.to(device), y.to(device)
                 if mask is not None:
                     mask = mask.to(device)
+                
+                # 文書境界で履歴をクリア（評価時も同様）
+                if is_doc_start is not None and model.config.task_mode == "lm":
+                    doc_start_indices = is_doc_start.nonzero(as_tuple=True)[0]
+                    if len(doc_start_indices) > 0:
+                        model.history.clear()
                 
                 psi0 = model.tokenize(x, mask)
                 h_emb = model.summarize_history(x.shape[0])
@@ -105,13 +118,27 @@ def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[
     try:
         for batch in loader:
             if len(batch) == 3:
-                x, y, mask = batch
+                # LM モード：(x, y, is_doc_start) の形式
+                if model.config.task_mode == "lm" and batch[2].dtype == torch.bool:
+                    x, y, is_doc_start = batch
+                    mask = None
+                else:
+                    x, y, mask = batch
+                    is_doc_start = None
             else:
                 x, y = batch
                 mask = None
+                is_doc_start = None
             x, y = x.to(device), y.to(device)
             if mask is not None:
                 mask = mask.to(device)
+            
+            # 文書境界で履歴をクリア（評価時も同様）
+            if is_doc_start is not None and model.config.task_mode == "lm":
+                doc_start_indices = is_doc_start.nonzero(as_tuple=True)[0]
+                if len(doc_start_indices) > 0:
+                    model.history.clear()
+            
             psi0 = model.tokenize(x, mask)
             h_emb = model.summarize_history(x.shape[0])
             psi_T = model.integrate(psi0, h_emb, use_amp=False)
@@ -216,15 +243,36 @@ def train_epoch(
         k3_optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, batch in enumerate(tqdm(loader, desc="train", leave=False)):
+        # バッチの形式に応じて処理
+        # LM モード：(x, y, is_doc_start) の 3 つ、または (x, y) の 2 つ
+        # Classify モード：(x, y, mask) の 3 つ、または (x, y) の 2 つ
         if len(batch) == 3:
-            x, y, mask = batch
+            # 3 つ目の要素が is_doc_start (bool テンソル) か mask かを判別
+            if model.config.task_mode == "lm" and batch[2].dtype == torch.bool:
+                x, y, is_doc_start = batch
+                mask = None
+            else:
+                x, y, mask = batch
+                is_doc_start = None
         else:
             x, y = batch
             mask = None
+            is_doc_start = None
+            
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         if mask is not None:
             mask = mask.to(device, non_blocking=True)
+        
+        # 文書境界フラグがある場合、該当サンプルの履歴をクリア
+        if is_doc_start is not None and model.config.task_mode == "lm":
+            with torch.no_grad():
+                # is_doc_start が True のサンプルのインデックスを取得
+                doc_start_indices = is_doc_start.nonzero(as_tuple=True)[0]
+                if len(doc_start_indices) > 0:
+                    # 文書先頭のサンプルがある場合、履歴をクリア
+                    # バッチ全体で共通の履歴を使うため、1 つでも文書先頭があればクリア
+                    model.history.clear()
 
         do_meta = ((global_step + 1) % config.k3_interval == 0) and (batch_idx % grad_accum_steps == 0)
 
@@ -296,11 +344,11 @@ def train_epoch(
         # --- HISTORY UPDATE ---
         # sekkeisyo: history_buffer.push(psi_T.detach())
         #            then decay all weights
+        # 改良：LM モードでも履歴を更新する（文書境界リセットによりリークは防止）
         with torch.no_grad():
-            if model.config.task_mode != "lm":
-                if psi_T.dim() == 2 and psi_T.shape[0] > 0:
-                    model.history.push(psi_T[0])
-                model.history.decay()
+            if psi_T.dim() == 2 and psi_T.shape[0] > 0:
+                model.history.push(psi_T[0])
+            model.history.decay()
 
         # --- K=3: META UPDATE (every k3_interval steps) ---
         # メタ損失: 全体の weighted loss を通して fm_weight/obs_weight に勾配を流す
