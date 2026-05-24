@@ -226,10 +226,9 @@ def train_epoch(
     use_amp: bool = False,
     use_bf16: bool = False,
     grad_accum_steps: int = 1,
-) -> tuple[float, float, float, float, int]:
+) -> tuple[float, float, float, int]:
     model.train()
     total_loss = 0.0
-    total_fm = 0.0
     total_obs = 0.0
     train_acc_sum = 0
     train_acc_total = 0
@@ -294,7 +293,6 @@ def train_epoch(
             
         with torch.amp.autocast("cuda", enabled=(use_amp or use_bf16), dtype=dtype):
             out = model.forward_train_batch(x, y, mask)
-            # Flow Matching 損失を無効化し、total_loss = obs_loss のみとする
             loss = out["loss_obs"]
         
         # 勾配累積のためのスケーリング
@@ -369,13 +367,12 @@ def train_epoch(
 
         global_step += 1
         total_loss += loss.item()
-        total_fm += 0.0  # Flow Matching 損失を無効化
         total_obs += out["loss_obs"].item()
         n_batches += 1
 
     d = max(n_batches, 1)
     avg_train_acc = train_acc_sum / max(train_acc_total, 1)
-    return total_loss / d, total_fm / d, total_obs / d, avg_train_acc, global_step
+    return total_loss / d, total_obs / d, avg_train_acc, global_step
 
 
 def train(
@@ -446,7 +443,7 @@ def train(
         print(f"K=3 Kernel Ridge Regression enabled (gamma={config.k3_krr_gamma}, interval={config.k3_krr_update_interval})")
 
     for epoch in range(1, config.epochs + 1):
-        avg_loss, avg_fm, avg_obs, avg_train_acc, global_step = train_epoch(
+        avg_loss, avg_obs, avg_train_acc, global_step = train_epoch(
             model, train_loader, k2_optimizer, k3_optimizer,
             device, config, kfac, global_step, 
             use_amp=use_amp, use_bf16=use_bf16, grad_accum_steps=grad_accum_steps,
