@@ -25,7 +25,7 @@ wheels/
 *.pyc
 *.pyo
 *.pyd
-
+ 
 # Pytest
 .pytest_cache/
 ```
