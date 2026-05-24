@@ -68,26 +68,25 @@ class ComplexTokenizer(nn.Module):
         """
         改良 2: X_base の固有分解を事前計算。
         X_base = V @ diag(λ) @ V^{-1}
-        固有値の実部は負に強制（発散防止）。
+        
+        Skew-Hermitian 行列の固有値は純虚数になるため、
+        exp(X_base) はユニタリ行列になる。
         """
         with torch.no_grad():
             # 基底歪エルミート行列
             X_base = self._build_skew_hermitian(self.A_base_re, self.A_base_im)
             
-            # 固有分解
+            # 固有分解：X_base = V @ diag(eigvals) @ V^{-1}
             eigvals, eigvecs = torch.linalg.eig(X_base)
             eigvecs_inv = torch.linalg.inv(eigvecs)
             
-            # delta_raw も同じ基底で表現
+            # delta_raw も同じ基底で表現（状態依存ゲート用）
             delta_raw = torch.complex(self.delta_proj_re, self.delta_proj_im)  # [D, 1]
-            delta_raw_matrix = delta_raw @ delta_raw.conj().T  # [D, D]
+            delta_raw_matrix = delta_raw @ delta_raw.conj().T  # [D, D] - rank-1 行列
             delta = self._build_skew_hermitian(delta_raw_matrix.real, delta_raw_matrix.imag)
-            delta_eig = eigvecs_inv @ delta @ eigvecs
             
-            # 固有値の実部を負に強制（発散防止）
-            # skew-hermitian なので実部は元々 0 付近だが、数値誤差対策
-            eigvals_re_clamped = -torch.nn.functional.softplus(-eigvals.real)
-            eigvals = eigvals_re_clamped + 1j * eigvals.imag
+            # delta を固有ベクトル基底に変換
+            delta_eig = eigvecs_inv @ delta @ eigvecs
             
             # バッファとして登録（勾配不要）
             self.register_buffer('eigvals', eigvals)
@@ -147,35 +146,22 @@ class ComplexTokenizer(nn.Module):
         # === 改良 2: 固有分解による高速計算 ===
         # X_j = X_base + gate * delta
         # 固有値分解：X_base = V @ diag(λ) @ V^{-1}
-        # delta も同じ基底で表現：delta_eig = V^{-1} @ delta @ V
+        # delta も同じ基底で表現済み：delta_eig = V^{-1} @ delta @ V
         
-        # 対角近似ではなく完全な行列計算を行う（ユニタリ性確保のため）
-        # lambda_j = exp(eigvals + gate * delta_eig_diag) は非ユニタリになる可能性
-        # があるので、歪エルミート性の仮定を維持
+        # 各バッチに対して対角近似で高速計算
+        # 対角要素のみ使用：exp(λ_i + gate * (delta_eig)_ii)
+        delta_eig_diag = torch.diag(self.delta_eig)  # [D]
         
-        # 簡易版：ゲートが小さい場合は X_base のみ使用
-        # ゲートが大きい場合は full matrix exponential を使用
-        
-        # スカラーゲートとして平均を使用
-        gate_scalar = gate.mean().item()
-        
-        if gate_scalar < 0.1:
-            # ゲートが小さい場合は X_base のみで近似
-            lambda_j = torch.exp(self.eigvals.unsqueeze(0))  # [1, D]
-            lambda_j = lambda_j.expand(B, -1)
-        else:
-            # 完全な計算：V @ exp(diag(eigvals) + gate * delta_eig) @ V^{-1}
-            # ただし delta_eig は対角ではないため、対角近似を使う
-            # より正確には matrix exponential が必要だが計算量増
-            delta_eig_diag = torch.diag(self.delta_eig)  # [D]
-            lambda_j = torch.exp(self.eigvals.unsqueeze(0) + gate.view(B, 1) * delta_eig_diag.unsqueeze(0))
+        # 各サンプルごとにゲートが異なるため、broadcasting で計算
+        # lambda_j[b, i] = exp(eigvals[i] + gate[b] * delta_eig_diag[i])
+        lambda_j = torch.exp(self.eigvals.unsqueeze(0) + gate.view(B, 1) * delta_eig_diag.unsqueeze(0))
         
         # A_j @ psi = V @ (lambda_j * (V^{-1} @ psi))
         psi_in_eig_basis = torch.matmul(self.eigvecs_inv, psi_prev.T).T  # [B, D]
         scaled = lambda_j * psi_in_eig_basis  # [B, D]
         A_j_psi = torch.matmul(scaled, self.eigvecs.T)  # [B, D]
         
-        # 下位互換性のため A_j も構築（O(D²)）
+        # 下位互換性のため A_j 行列も構築（O(D²)）
         # V @ diag(λ) @ V^{-1} の計算
         # (V * λ.unsqueeze(0)) @ V^{-1}
         A_j = (self.eigvecs * lambda_j.unsqueeze(1)) @ self.eigvecs_inv

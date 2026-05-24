@@ -197,17 +197,21 @@ def evaluate(model: GRIM, loader: DataLoader, device: torch.device) -> float:
 def _collect_k2_params(model: GRIM) -> list[torch.nn.Parameter]:
     """
     sekkeisyo PARAMETER GROUPS:
-    K2_PARAMETERS — meta.* を除く全パラメータ
+    K2_PARAMETERS — meta.* と flow_field.raw_* を除く全パラメータ
+    flow_field.raw_* は K-3 層のパラメータ（カーネルリッジ回帰で更新）
     """
-    return [p for n, p in model.named_parameters() if not n.startswith("meta.")]
+    return [p for n, p in model.named_parameters() 
+            if not n.startswith("meta.") and not n.startswith("flow_field.raw_")]
 
 
 def _collect_k3_params(model: GRIM) -> list[torch.nn.Parameter]:
     """
     sekkeisyo PARAMETER GROUPS:
-    K3_PARAMETERS — meta.* のみ
+    K3_PARAMETERS — meta.* と flow_field.raw_* （ベクトル場のハイパーパラメータ）
+    これらのパラメータはカーネルリッジ回帰またはメタ勾配で更新される
     """
-    return [p for n, p in model.named_parameters() if n.startswith("meta.")]
+    return [p for n, p in model.named_parameters() 
+            if n.startswith("meta.") or n.startswith("flow_field.raw_")]
 
 
 def train_epoch(
