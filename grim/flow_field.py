@@ -100,10 +100,10 @@ class EnergyVectorField(nn.Module):
         eps_w = 1e-8
         e_world = -torch.log(overlap_sq.clamp_min(eps_w))
         
-        # 勾配: d/dpsi* (-log(|<p|p0>|^2)) = -p0 / <p|p0>
-        # |<p|p0>|^2 = <p|p0><p0|p>
-        # d/dp* log(<p|p0><p0|p>) = p0 * <p0|p> / |<p|p0>|^2 = p0 * overlap.conj() / overlap_sq
-        grad_world = (-overlap.conj() / (overlap_sq.clamp_min(eps_w))).unsqueeze(-1) * psi0
+        # 勾配: PyTorch の複素微分規約では grad = 2 * ∂f/∂ψ*
+        # ∂f/∂ψ* (-log(|⟨ψ|ψ₀⟩|²)) = -⟨ψ₀|ψ⟩ / |⟨ψ|ψ₀⟩|² · ψ₀ = -overlap.conj() / overlap_sq · ψ₀
+        # PyTorch は 2 倍を返すので、手動計算でも 2 倍する
+        grad_world = 2 * (-overlap.conj() / (overlap_sq.clamp_min(eps_w))).unsqueeze(-1) * psi0
 
         # --- 2. E_self: 自己無撞着性 ---
         # E_self = lam * ||psi||^2
@@ -111,8 +111,9 @@ class EnergyVectorField(nn.Module):
         lam = F.softplus(self.raw_lam)
         e_self = lam * e_norm
         
-        # 勾配: d/dpsi* (lam * |psi|^2) = lam * psi
-        grad_self = lam * psi
+        # 勾配: d/dψ* (lam * |ψ|²) = lam * ψ
+        # PyTorch 規約で 2 倍：grad = 2 * lam * ψ
+        grad_self = 2 * lam * psi
 
         # --- 3. E_cont: 連続性 ---
         # 修正点: arccos の代わりに √(2 - 2|<ψ|h⟩|) を使用
@@ -149,20 +150,20 @@ class EnergyVectorField(nn.Module):
             weighted_sum = torch.sum(weights.unsqueeze(0) * kernel, dim=-1)  # [B]
             e_cont = - (mu / len(entries)) * weighted_sum
             
-            # 勾配計算 (手動微分)
-            # E_cont = -(mu/N) * sum_i w_i * exp(-d_i^2 / 2sigma^2)
-            # dE/dd = (mu/N) * sum_i w_i * exp(...) * (d_i / sigma^2)
+            # 勾配計算 (手動微分) - PyTorch 規約で 2 倍
+            # E_cont = -(μ/N) * Σ_i w_i * exp(-d_i² / 2σ²)
+            # dE/dd = (μ/N) * Σ_i w_i * exp(...) * (d_i / σ²)
             # dd/d|ov| = -1 / sqrt(2-2|ov|) = -1/d
-            # d|ov|/dp* = (1/2|ov|) * ov.conj() * h
-            # 合成: grad = (mu/N) * sum_i [w_i * kernel_i * (d_i/sigma^2) * (-1/d_i) * (0.5 * ov_i.conj()/|ov_i|) * h_i]
-            #      = (mu/N) * sum_i [w_i * kernel_i * (-1/(2*sigma^2*|ov_i|)) * ov_i.conj() * h_i]
+            # d|ov|/dψ* = (1/2|ov|) * ov.conj() * h_i
+            # 合成: grad = (μ/N) * Σ_i [w_i * kernel_i * (d_i/σ²) * (-1/d_i) * (0.5 * ov_i.conj()/|ov_i|) * h_i]
+            #      = (μ/N) * Σ_i [w_i * kernel_i * (-1/(2σ²*|ov_i|)) * ov_i.conj() * h_i]
+            # PyTorch 規約で 2 倍
             
-            factor = (mu / len(entries)) * weights.unsqueeze(0) * kernel / (2 * sigma**2)
+            factor = 2 * (mu / len(entries)) * weights.unsqueeze(0) * kernel / (2 * sigma**2)
             # ov_i.conj() / |ov_i| の計算 (|ov|=0 で除算回避)
             phase = overlaps.conj() / (abs_overlap.clamp_min(1e-9))
             
-            # grad_cont = -sum_i factor_i * phase_i * h_i
-            # (minus は dE/dd の符号から)
+            # grad_cont = -Σ_i factor_i * phase_i * h_i
             grad_cont = -torch.mm(factor * phase, psis)
 
         # --- 4. E_explore: 探索 ---
