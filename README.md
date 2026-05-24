@@ -6,6 +6,76 @@ GRIM (Geometric RKHS Integrative Model) は、複素射影ヒルベルト空間 
 
 ---
 
+## NumPy 版実装状況（2025 年更新）
+
+### ✅ NumPy 移行済みファイル（推論・生成専用）
+
+| ファイル | 内容 | 用途 |
+|---------|------|------|
+| `grim/geometry_np.py` | 複素内積、FS 距離、正規化、接空間射影 | 幾何学演算 |
+| `grim/tokenizer_np.py` | `NumPyTokenizer` クラス | トークン埋め込み・状態構成 |
+| `grim/flow_field_np.py` | `NumPyEnergyField` クラス | エネルギー関数と勾配 |
+| `grim/ode_solver_np.py` | `integrate_flow` 関数 | scipy.integrate.solve_ivp 使用 |
+| `grim/observation_np.py` | `born_probs` 関数 | ボルン則による確率計算 |
+| `grim/history_np.py` | `NumPyHistory` クラス | 階層的履歴バッファ |
+| `grim/model_np.py` | `NumPyGRIM` クラス | 推論・生成専用モデル |
+
+**特徴:**
+- 依存：numpy, scipy.integrate.solve_ivp のみ
+- dtype：np.complex128（状態）, np.float64（実数パラメータ）
+- 逆伝播（BP）を含まないため、訓練には使用不可
+- 推論・生成のみを対象
+
+**動作確認:**
+```bash
+python test_numpy_grim.py
+```
+全 7 モジュールのテストに合格しました（2025 年現在）。
+
+### ❌ PyTorch 版のままのファイル（訓練用）
+
+| ファイル | 内容 | 後日移行予定 |
+|---------|------|-------------|
+| `grim/training.py` | 訓練ループ（BP 使用） | 未定 |
+| `grim/natural_grad.py` | KFAC 自然勾配 | 未定 |
+| `grim/meta.py` | K=3 メタ学習 | 未定 |
+| `scripts/train.py` | 訓練スクリプト | 未定 |
+| `data/*.py` | DataLoader | PyTorch のまま併用可 |
+
+---
+
+## Web UI の使用方法
+
+### NumPy モードでの推論
+
+Web UI の「文章生成」タブで **「NumPy モード (推論のみ)」** チェックボックスをオンにすると、PyTorch ではなく NumPy 版モデルを使用してテキストを生成できます。
+
+**特徴:**
+- 訓練済みチェックポイントからパラメータを読み取り、NumPy 版で推論
+- バックプロパゲーション不使用のため高速
+- 実験的な機能として提供
+
+### 学習ログの確認
+
+Web UI の「学習」タブでモデルを訓練すると、**「ログ出力」** テキストボックスに以下の情報がリアルタイムで表示されます：
+
+- 使用デバイス（CPU/GPU）
+- データセット情報
+- エポック進行状況
+- 損失値（loss, loss_obs）
+- トークン精度（acc）
+- パープレキシティ（ppl）
+- チェックポイント保存情報
+
+**起動方法:**
+```bash
+python scripts/webui.py --port 7860
+```
+
+ブラウザで `http://localhost:7860` にアクセスしてください。
+
+---
+
 ## 1. 数学的基礎
 
 ### 1.1 状態空間
