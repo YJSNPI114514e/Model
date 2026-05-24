@@ -264,6 +264,11 @@ def train_model(
     checkpoint_dir: str,
     no_natural_grad: bool,
     resume: bool,
+    use_k3_krr: bool = False,
+    k3_gamma: float = 0.01,
+    k3_interval: int = 3,
+    k3_smoothing: float = 0.3,
+    k3_max_buffer: int = 30,
 ) -> str:
     import torch
 
@@ -333,6 +338,15 @@ def train_model(
             
             if no_natural_grad:
                 config.use_natural_grad = False
+
+            # K=3 カーネルリッジ回帰メタ学習の設定
+            if use_k3_krr:
+                config.use_k3_kernel_ridge = True
+                config.k3_krr_gamma = k3_gamma
+                config.k3_krr_update_interval = k3_interval
+                config.k3_krr_smoothing = k3_smoothing
+                config.k3_krr_max_buffer = k3_max_buffer
+                print(f"K=3 Kernel Ridge Regression enabled (gamma={k3_gamma}, interval={k3_interval})")
 
             use_cuda = device_name.startswith("cuda")
             train_loader, val_loader, vocab = get_lm_loaders(
@@ -427,6 +441,14 @@ def build_ui() -> gr.Blocks:
             train_device = gr.Textbox(label="device", value="", placeholder="cuda or cpu or leave empty")
             train_ckpt_dir = gr.Textbox(label="checkpoint dir", value="checkpoints")
             train_resume = gr.Checkbox(label="既存のチェックポイントから再開", value=False)
+            
+            with gr.Accordion("K=3 カーネルリッジ回帰メタ学習（オプション）", open=False):
+                train_use_k3_krr = gr.Checkbox(label="K=3 カーネルリッジ回帰を有効化", value=False)
+                train_k3_gamma = gr.Number(label="γ (KL 正則化強度)", value=0.01, precision=5)
+                train_k3_interval = gr.Number(label="更新間隔（エポック数）", value=3, precision=0)
+                train_k3_smoothing = gr.Number(label="移動平均係数", value=0.3, precision=3)
+                train_k3_max_buffer = gr.Number(label="バッファ最大サイズ", value=30, precision=0)
+            
             train_button = gr.Button("学習を開始")
             train_output = gr.Textbox(label="ログ出力", lines=20)
             train_button.click(
@@ -450,6 +472,11 @@ def build_ui() -> gr.Blocks:
                     train_ckpt_dir,
                     train_no_natural,
                     train_resume,
+                    train_use_k3_krr,
+                    train_k3_gamma,
+                    train_k3_interval,
+                    train_k3_smoothing,
+                    train_k3_max_buffer,
                 ],
                 outputs=[train_output],
             )
