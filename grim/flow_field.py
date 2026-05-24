@@ -117,7 +117,16 @@ class EnergyVectorField(nn.Module):
         # --- 3. E_cont: 連続性 ---
         # 修正点: arccos の代わりに √(2 - 2|<ψ|h⟩|) を使用
         history = self.history_getter()
-        entries = history._entries if history is not None else []
+        
+        # 階層的履歴バッファから全エントリを取得
+        entries = []
+        if history is not None:
+            if hasattr(history, 'short_term'):
+                # HierarchicalHistoryBuffer の場合
+                entries = history.short_term + history.mid_term + history.long_term
+            elif hasattr(history, '_entries'):
+                # 旧 HistoryBuffer との互換性
+                entries = history._entries
         
         if not entries:
             e_cont = torch.zeros(B, device=device, dtype=psi.real.dtype)
