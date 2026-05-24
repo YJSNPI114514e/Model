@@ -200,13 +200,6 @@ def train_epoch(
             
             # 次のバッチのためにゼロクリア
             k2_optimizer.zero_grad(set_to_none=True)
-        # sekkeisyo: clip K2 params only
-        torch.nn.utils.clip_grad_norm_(k2_params, config.grad_clip)
-        if use_amp:
-            scaler.step(k2_optimizer)
-            scaler.update()
-        else:
-            k2_optimizer.step()
 
         if model.config.task_mode == "classify":
             model.reorthogonalize_obs()
