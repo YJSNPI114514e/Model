@@ -107,34 +107,29 @@ class GRIM(nn.Module):
 
     def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Tensor:
         """
-        改良 1: マージン最大化損失（ヒンジ損失 + ボルン則）
+        改良 1: ボルン則に基づくクロスエントロピー損失
         
-        correct_score = |⟨e_y|ψ_T⟩|²
-        best_wrong_score = max_{k≠y} |⟨e_k|ψ_T⟩|²
-        margin = correct_score - best_wrong_score
-        loss = max(0, 1.0 - margin)  # ヒンジ損失
+        Born 則により確率を計算：
+        p(k) = |⟨e_k|ψ_T⟩|² / Σ_j |⟨e_j|ψ_T⟩|²
         
-        マージンが 1 未満なら罰則、1 以上ならゼロ。
-        εや log は不要。計算が軽くなる。
+        クロスエントロピー損失：
+        loss = -log(p(y))
         """
-        scores = self.generation.token_scores(psi_T)  # [B, V]
-        B = scores.shape[0]
+        # トークン埋め込みとの内積の二乗（ボルン則）
+        token_embeddings = self.tokenizer.embeddings  # [V, D]
+        scores = torch.abs(token_embeddings @ psi_T.conj().T) ** 2  # [V, B]
         
-        # 正解スコア
-        y = target_token_ids
-        correct_score = scores[torch.arange(B, device=scores.device), y]  # [B]
+        # 正規化して確率に変換
+        probs = scores / (scores.sum(dim=0, keepdim=True) + 1e-8)  # [V, B]
         
-        # 不正解の最大スコア：正解をマスク
-        mask = torch.ones_like(scores, dtype=torch.bool)
-        mask[torch.arange(B, device=scores.device), y] = False
-        wrong_scores = scores.masked_fill(mask, float('-inf'))
-        best_wrong_score = wrong_scores.max(dim=-1).values  # [B]
+        # ターゲットトークンの確率を取得
+        B = psi_T.shape[0]
+        target_probs = probs[target_token_ids, torch.arange(B, device=psi_T.device)]
         
-        # マージンとヒンジ損失
-        margin = correct_score - best_wrong_score
-        loss = torch.clamp(1.0 - margin, min=0.0)  # max(0, 1 - margin)
+        # クロスエントロピー損失
+        loss = -torch.log(target_probs + 1e-8).mean()
         
-        return loss.mean()
+        return loss
 
     def observation_loss(self, psi_T: Tensor, labels: Tensor) -> Tensor:
         probs = self.observation.born_probs(psi_T)
