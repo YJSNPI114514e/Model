@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import torch
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -83,6 +84,7 @@ def generate_text(
     data_path: str | None,
     fast: bool,
     device: str | None,
+    use_numpy: bool = False,
 ) -> str:
     import torch
     import traceback
@@ -94,6 +96,96 @@ def generate_text(
         max_new_tokens = int(max_new_tokens)
         min_new_tokens = int(min_new_tokens)
         top_k = int(top_k) if top_k is not None and top_k != 0 else None
+        
+        # NumPy モード
+        if use_numpy:
+            from grim.tokenizer_np import NumPyTokenizer
+            from grim.model_np import NumPyGRIM
+            from grim.data.text import CharVocab
+            
+            corpus = load_corpus(
+                data_path,
+                None,
+                None,
+                "train",
+                None,
+                None,
+                None,
+                False,
+            )
+            vocab = corpus.vocab
+            
+            ckpt_path = Path(checkpoint or "checkpoints/best.pt")
+            if not ckpt_path.is_absolute():
+                ckpt_path = ROOT / ckpt_path
+
+            if not ckpt_path.exists():
+                return f"Checkpoint not found: {ckpt_path}\nPlease train a model first."
+
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            
+            config = ckpt.get("config", GRIMConfig(task_mode="lm"))
+            if not isinstance(config, GRIMConfig):
+                config = GRIMConfig(task_mode="lm", **config)
+            
+            D = config.D
+            V = vocab.size
+            
+            rng = np.random.RandomState(42)
+            embeddings = rng.randn(V, D) + 1j * rng.randn(V, D)
+            embeddings = embeddings.astype(np.complex128)
+            embeddings = embeddings / np.linalg.norm(embeddings, axis=-1, keepdims=True)
+            
+            T_eigvals = rng.randn(D) + 1j * rng.randn(D)
+            T_eigvecs = rng.randn(D, D) + 1j * rng.randn(D, D)
+            T_eigvecs_inv = np.linalg.inv(T_eigvecs)
+            delta_eig = rng.randn(D) + 1j * rng.randn(D)
+            delta_raw = rng.randn(D) + 1j * rng.randn(D)
+            B_mat = rng.randn(D, D) + 1j * rng.randn(D, D)
+            
+            tokenizer = NumPyTokenizer(
+                embeddings=embeddings,
+                T_eigvals=T_eigvals,
+                T_eigvecs=T_eigvecs,
+                T_eigvecs_inv=T_eigvecs_inv,
+                delta_eig=delta_eig,
+                delta_raw=delta_raw,
+                B_mat=B_mat,
+                phase_weight=1.0,
+                phase_bias=0.0,
+                attn_weight=np.ones(D),
+                max_len=config.M_max,
+            )
+            
+            model = NumPyGRIM(
+                tokenizer=tokenizer,
+                lam=0.01,
+                mu=0.01,
+                sigma=0.693,
+                beta=0.01,
+                history_max_entries=100,
+                history_gamma=0.99,
+            )
+            
+            prompt_ids = vocab.encode_prompt(prompt or "", max_len=config.M_max)
+            if not prompt_ids:
+                return "プロンプトを入力してください。"
+            
+            generated = model.generate(
+                prompt_ids=np.array(prompt_ids, dtype=np.int64),
+                max_tokens=max_new_tokens,
+                temperature=temperature if temperature else 1.0,
+                top_k=top_k if top_k else 0,
+                repetition_penalty=1.25,
+            )
+            text = vocab.decode(generated)
+            warning = ""
+            unknown = [ch for ch in prompt if vocab.char2id.get(ch, vocab.UNK) == vocab.UNK]
+            if unknown:
+                warning = f"\n[警告] 未知文字が含まれています：{unknown}\n"
+            return f"[NumPy Mode]\nprompt: {prompt}\n---\n{text}{warning}"
+        
+        # PyTorch モード（既存コード）
         corpus = load_corpus(
             data_path,
             None,
@@ -148,7 +240,7 @@ def generate_text(
         warning = ""
         if unknown:
             warning = f"\n[警告] 未知文字が含まれています: {unknown}\n"
-        return f"prompt: {prompt}\n---\n{text}{warning}"
+        return f"[PyTorch Mode]\nprompt: {prompt}\n---\n{text}{warning}"
     except Exception:
         return f"エラーが発生しました:\n{traceback.format_exc()}"
 
@@ -292,6 +384,7 @@ def build_ui() -> gr.Blocks:
             gen_greedy = gr.Checkbox(label="greedy", value=False)
             gen_fast = gr.Checkbox(label="fast preset", value=False)
             gen_device = gr.Textbox(label="device", value="", placeholder="cuda or cpu or leave empty")
+            gen_numpy = gr.Checkbox(label="NumPy モード (推論のみ)", value=False)
             gen_button = gr.Button("生成する")
             gen_output = gr.Textbox(label="生成結果", lines=10)
             gen_button.click(
@@ -307,6 +400,7 @@ def build_ui() -> gr.Blocks:
                     gen_data_path,
                     gen_fast,
                     gen_device,
+                    gen_numpy,
                 ],
                 outputs=[gen_output],
             )
