@@ -81,6 +81,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-pin-memory", action="store_true", help="ピンメモリの無効化")
     p.add_argument("--compile", action="store_true", help="torch.compile でモデル最適化（PyTorch 2.0+）")
     p.add_argument("--resume", action="store_true", help="既存のチェックポイントから再開")
+    
+    # K=3 カーネルリッジ回帰メタ学習オプション
+    p.add_argument("--use-k3-krr", action="store_true", help="K=3 カーネルリッジ回帰メタ学習を有効化")
+    p.add_argument("--k3-gamma", type=float, default=0.01, help="K3-KRR KL 正則化強度γ (default: 0.01)")
+    p.add_argument("--k3-interval", type=int, default=3, help="K3-KRR 更新間隔エポック数 (default: 3)")
+    p.add_argument("--k3-smoothing", type=float, default=0.3, help="K3-KRR 移動平均係数 (default: 0.3)")
+    p.add_argument("--k3-max-buffer", type=int, default=30, help="K3-KRR バッファ最大サイズ (default: 30)")
     return p.parse_args()
 
 
@@ -205,6 +212,14 @@ def _main(args: argparse.Namespace) -> None:
     
     if args.no_natural_grad:
         config.use_natural_grad = False
+    
+    # K=3 カーネルリッジ回帰メタ学習の設定
+    if args.use_k3_krr:
+        config.use_k3_kernel_ridge = True
+        config.k3_krr_gamma = args.k3_gamma
+        config.k3_krr_update_interval = args.k3_interval
+        config.k3_krr_smoothing = args.k3_smoothing
+        config.k3_krr_max_buffer = args.k3_max_buffer
 
     use_cuda = device_name.startswith("cuda")
     

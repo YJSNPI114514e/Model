@@ -15,6 +15,79 @@ from grim.model import GRIM
 from grim.natural_grad import KFACNaturalGradient
 
 
+def _get_psi_T_numpy(psi_T: torch.Tensor) -> "np.ndarray":
+    """torch.Tensor から NumPy 配列へ変換（複素数対応）。"""
+    import numpy as np
+    return psi_T.detach().cpu().numpy()
+
+
+def _evaluate_val_loss(
+    model: GRIM,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, torch.Tensor]:
+    """検証損失と平均ψ_T を計算。
+    
+    Returns:
+        (avg_val_loss, mean_psi_T) のタプル。
+    """
+    import numpy as np
+    
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    psi_T_list = []
+    
+    # Save and clear history
+    saved_history = []
+    for layer in [model.history.short_term, model.history.mid_term, model.history.long_term]:
+        saved_history.extend(list(layer))
+    model.history.clear()
+    
+    try:
+        with torch.no_grad():
+            for batch in loader:
+                if len(batch) == 3:
+                    x, y, mask = batch
+                else:
+                    x, y = batch
+                    mask = None
+                x, y = x.to(device), y.to(device)
+                if mask is not None:
+                    mask = mask.to(device)
+                
+                psi0 = model.tokenize(x, mask)
+                h_emb = model.summarize_history(x.shape[0])
+                psi_T = model.integrate(psi0, h_emb, use_amp=False)
+                
+                # Born Rule 確率
+                probs = model.generation.born_probs(psi_T)
+                
+                # NLL 損失
+                log_probs = torch.log(probs.clamp_min(1e-8))
+                loss = F.nll_loss(log_probs, y, reduction="sum")
+                total_loss += loss.item()
+                total_samples += y.numel()
+                
+                # ψ_T を保存（バッチ平均）
+                psi_T_np = _get_psi_T_numpy(psi_T.mean(dim=0))
+                psi_T_list.append(psi_T_np)
+    finally:
+        # Restore history
+        model.history.clear()
+        for e in saved_history:
+            model.history._entries.append(e)
+    
+    avg_loss = total_loss / max(total_samples, 1)
+    
+    # 平均ψ_T を計算
+    import numpy as np
+    mean_psi_T = np.mean(np.array(psi_T_list), axis=0) if psi_T_list else np.zeros(1)
+    
+    model.train()
+    return avg_loss, mean_psi_T
+
+
 @torch.no_grad()
 def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[float, float, float]:
     """次トークン精度、パープレキシティ、P(y_true) 平均。"""
@@ -307,6 +380,18 @@ def train(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_metric = 0.0
     global_step = 0
+    
+    # K=3 カーネルリッジ回帰メタ学習器（オプション）
+    k3_krr = None
+    if config.use_k3_kernel_ridge:
+        from grim.k3_meta_learner import K3MetaLearner
+        k3_krr = K3MetaLearner(
+            gamma=config.k3_krr_gamma,
+            max_buffer_size=config.k3_krr_max_buffer,
+            update_interval=config.k3_krr_update_interval,
+            smoothing_factor=config.k3_krr_smoothing,
+        )
+        print(f"K=3 Kernel Ridge Regression enabled (gamma={config.k3_krr_gamma}, interval={config.k3_krr_update_interval})")
 
     for epoch in range(1, config.epochs + 1):
         avg_loss, avg_fm, avg_obs, avg_train_acc, global_step = train_epoch(
@@ -316,6 +401,38 @@ def train(
         )
         if config.task_mode == "lm":
             acc, ppl, avg_p_true = evaluate_lm(model, val_loader, device)
+            
+            # K=3 カーネルリッジ回帰によるメタパラメータ更新
+            if k3_krr is not None and k3_krr.should_update(epoch):
+                val_loss, psi_T_mean = _evaluate_val_loss(model, val_loader, device)
+                
+                # メタパラメータの現在値を取得
+                meta_dict = model.meta.as_dict()
+                lam = meta_dict.get('meta_lambda', 0.01)
+                beta = meta_dict.get('meta_beta', 0.01)
+                
+                # データを蓄積
+                k3_krr.accumulate(psi_T_mean, val_loss, lam, beta)
+                
+                # 十分なデータがあれば更新
+                if len(k3_krr.psi_buffer) >= 10:
+                    lam_new, beta_new, weights = k3_krr.update(lam, beta)
+                    
+                    # 移動平均で急激な変化を防止
+                    lam_smoothed, beta_smoothed = k3_krr.smooth_update(lam, beta, lam_new, beta_new)
+                    
+                    # モデルのメタパラメータを更新
+                    with torch.no_grad():
+                        # softplus の逆関数を通してパラメータを設定
+                        import math
+                        def inv_softplus(x: float) -> float:
+                            return math.log(math.exp(max(x, 1e-8)) - 1.0)
+                        
+                        model.meta.meta_lambda.copy_(torch.tensor(inv_softplus(lam_smoothed)))
+                        model.meta.meta_beta.copy_(torch.tensor(inv_softplus(beta_smoothed)))
+                    
+                    print(f"  K3-KRR update: lambda={lam_smoothed:.6f}, beta={beta_smoothed:.6f}")
+            
             meta_w = model.meta.as_dict()
             random_p = 1.0 / config.V
             print(

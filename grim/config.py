@@ -35,6 +35,14 @@ class GRIMConfig:
     alpha_fm: float = 0.5
     beta_kl: float = 0.01
     k3_interval: int = 100              # sekkeisyo: K3 updates every 100 steps
+    
+    # K=3 カーネルリッジ回帰メタ学習（NumPy 版）
+    use_k3_kernel_ridge: bool = False   # True でカーネルリッジ回帰による K=3 更新
+    k3_krr_gamma: float = 0.01          # KL 正則化強度γ
+    k3_krr_update_interval: int = 3     # 更新間隔（エポック数）
+    k3_krr_smoothing: float = 0.3       # 移動平均係数
+    k3_krr_max_buffer: int = 30         # バッファ最大サイズ
+    
     batch_size: int = 32
     epochs: int = 10
     grad_clip: float = 1.0
