@@ -1,9 +1,11 @@
-"""動的履歴バッファ H（第2.5節）。"""
+"""動的履歴バッファ H（第 2.5 節）。
+階層的圧縮版：短期・中期・長期の 3 層構造で OOM リスク低減。
+"""
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -14,8 +16,8 @@ from torch import Tensor
 class HistoryEntry:
     psi: Tensor
     weight: float
-    utility: float  # 改良 3: 有用性スコア
-    age: int  # 改良 3: 生存ステップ数
+    utility: float = 0.0  # 有用性スコア（下位互換性のため）
+    age: int = 0  # 生存ステップ数（下位互換性のため）
 
 
 class HistoryEmbedder(nn.Module):
@@ -31,19 +33,31 @@ class HistoryEmbedder(nn.Module):
         return self.proj_re(feat) + self.proj_im(feat)
 
 
-class HistoryBuffer:
-    """
-    H = { (|ψ^{(i)}⟩, w_i, u_i, age_i) }
-    書込・減衰・容量制限（循環バッファ）
-    
-    改良 3: 有用性ベース管理
-    - 各エントリに有用性スコア utility を付与
-    - スコアが低いものから優先削除
-    - utility > 0.01 → 減衰率 0.999（長く保持）
-    - utility < 0.00 → 減衰率 0.95（早く忘れる）
-    - 最低でも 10 ステップは生存させる（評価期間確保）
-    """
+def complex_inner(a: Tensor, b: Tensor) -> Tensor:
+    """複素数ベクトルの内積 <a, b> = sum(a * conj(b))"""
+    return torch.sum(a * torch.conj(b), dim=-1)
 
+
+def normalize_state(psi: Tensor, dim: int = -1) -> Tensor:
+    """状態ベクトルのノルムを 1 に正規化"""
+    norm = torch.norm(psi, dim=dim, keepdim=True)
+    return psi / (norm + 1e-8)
+
+
+class HierarchicalHistoryBuffer:
+    """
+    階層的履歴バッファ (Short/Mid/Long term memory)
+    
+    OOM リスク低減のため、最大エントリ数を制限しつつ、
+    Fubini-Study 距離に基づく自動クラスタリングで情報を圧縮保持する。
+    
+    構造:
+    - 短期層（short_term）: 最大 10 エントリ。そのまま保持。
+    - 中期層（mid_term）  : 最大 50 エントリ。短期から FS 距離で圧縮。
+    - 長期層（long_term） : 最大 40 エントリ。中期からさらに圧縮。
+    - 合計最大 100 エントリ（OOM 対策の N_max=100 と一致）。
+    """
+    
     def __init__(
         self,
         n_max: int,
@@ -52,110 +66,243 @@ class HistoryBuffer:
         embedder: HistoryEmbedder,
         device: torch.device,
     ) -> None:
-        self.n_max = n_max
         self.gamma = gamma
         self.eps = eps
         self.embedder = embedder
         self.device = device
-        self._entries: deque[HistoryEntry] = deque(maxlen=n_max)
         
-        # 改良 3: 有用性更新用
+        # 各層の最大サイズ
+        self.max_short = 10
+        self.max_mid = 50
+        self.max_long = 40
+        # 合計最大 100 エントリ
+        
+        # 履歴ストレージ
+        self.short_term: List[HistoryEntry] = []
+        self.mid_term: List[HistoryEntry] = []
+        self.long_term: List[HistoryEntry] = []
+        
+        # 下位互換性のための属性
+        self.n_max = n_max
         self._step_counter = 0
-        self._utility_update_interval = 10  # 10 ステップに 1 回更新
-        self._min_survival_steps = 10  # 最低生存ステップ数
-
+        
     def clear(self) -> None:
-        self._entries.clear()
-
-    def _compute_utility(self, entry: HistoryEntry, current_psi: Tensor | None = None) -> float:
-        """
-        改良 3: 有用性スコアの計算（簡易版）
-        
-        厳密には P(target|with_history) - P(target|without) だが、
-        計算コストが高いため、以下の簡易指標を使用：
-        - エントリの重みが大きいほど有用
-        - 最近使われたほど有用
-        - 年齢が若いほど未知の可能性
-        """
-        if current_psi is None:
-            # 簡易スコア：weight と age の組み合わせ
-            base_utility = entry.weight * (1.0 / (1.0 + entry.age * 0.1))
-            return base_utility
-        
-        # ψとの類似度を追加（オプション）
-        similarity = torch.abs(torch.vdot(entry.psi.squeeze(0), current_psi)).real.item()
-        base_utility = entry.weight * similarity * (1.0 / (1.0 + entry.age * 0.1))
-        return base_utility
-
-    def decay(self) -> None:
-        """
-        改良 3: 有用性に基づいた減衰
-        - utility > 0.01 → 減衰率 0.999（長く保持）
-        - utility < 0.00 → 減衰率 0.95（早く忘れる）
-        """
-        self._step_counter += 1
-        
-        # 10 ステップに 1 回、有用性を更新
-        if self._step_counter % self._utility_update_interval == 0:
-            for entry in self._entries:
-                entry.utility = self._compute_utility(entry)
-        
-        kept: deque[HistoryEntry] = deque(maxlen=self.n_max)
-        for e in self._entries:
-            # 年齢を更新
-            e.age += 1
-            
-            # 有用性に基づく減衰率の調整
-            if e.utility > 0.01:
-                decay_rate = 0.999  # 長く保持
-            elif e.utility < 0.0:
-                decay_rate = 0.95  # 早く忘れる
-            else:
-                decay_rate = self.gamma  # デフォルト
-            
-            w = e.weight * decay_rate
-            # 最低生存ステップ数は経過するまで削除しない
-            if w >= self.eps or e.age < self._min_survival_steps:
-                kept.append(HistoryEntry(e.psi, w, e.utility, e.age))
-        
-        self._entries = kept
+        """全履歴をクリア"""
+        self.short_term.clear()
+        self.mid_term.clear()
+        self.long_term.clear()
 
     def push(self, psi: Tensor, weight: float = 1.0) -> None:
         """
-        改良 3: 新規エントリは utility=0.0（未知）、age=0 で開始
+        新しい状態を短期メモリに追加し、溢れたら圧縮を行う。
+        
+        Args:
+            psi: 現在の状態ベクトル [B, D] または [D]
+            weight: 初期重み
         """
-        if psi.dim() == 1:
-            psi = psi.unsqueeze(0)
-        self._entries.append(HistoryEntry(psi.detach().clone(), weight, utility=0.0, age=0))
-        if len(self._entries) > self.n_max:
-            # 改良 3: 容量オーバー時は utility スコアの低いものから削除
-            # ただし age < min_survival_steps のものは保護
-            entries_list = list(self._entries)
-            
-            # 保護対象を分離
-            protected = [e for e in entries_list if e.age < self._min_survival_steps]
-            removable = [e for e in entries_list if e.age >= self._min_survival_steps]
-            
-            if len(protected) >= self.n_max:
-                # 全て保護対象の場合、最も古いものを削除
-                self._entries.popleft()
-            else:
-                # 削除対象から utility が最小のものを探す
-                if removable:
-                    min_util_entry = min(removable, key=lambda e: e.utility)
-                    removable.remove(min_util_entry)
-                    self._entries = deque(protected + removable, maxlen=self.n_max)
-                else:
-                    self._entries.popleft()
+        # バッチ次元がある場合は代表値（先頭）を取る
+        if psi.dim() == 2:
+            psi = psi[0]
+        
+        psi_detached = psi.detach().clone()
+        
+        self.short_term.append(HistoryEntry(
+            psi=psi_detached, 
+            weight=weight, 
+            utility=0.0, 
+            age=0
+        ))
+        
+        # 短期が溢れたら中期へ圧縮
+        if len(self.short_term) > self.max_short:
+            self._compress_short_to_mid()
+        
+        # 中期が溢れたら長期へ移動
+        if len(self.mid_term) > self.max_mid:
+            self._compress_mid_to_long()
 
-    def summarize(self, batch_size: int = 1) -> Tensor:
-        """H_emb = Σ w_i · κ_emb(|ψ^{(i)}⟩)"""
-        D_h = self.embedder.proj_re.out_features
-        if not self._entries:
-            return torch.zeros(batch_size, D_h, device=self.device)
-        psis = torch.stack([e.psi.squeeze(0) for e in self._entries], dim=0)
-        weights = torch.tensor([e.weight for e in self._entries], device=self.device)
-        weights = weights / weights.sum().clamp_min(1e-8)
-        emb = self.embedder(psis)
-        h = torch.sum(weights.unsqueeze(-1) * emb, dim=0)
-        return h.unsqueeze(0).expand(batch_size, -1)
+    def _compress_short_to_mid(self) -> None:
+        """
+        短期層の全エントリから、FS 距離が最も近い 2 つを見つけ、
+        測地線中点に統合して中期層に追加する。
+        """
+        if len(self.short_term) < 2:
+            return
+
+        psis = torch.stack([e.psi for e in self.short_term])  # [S, D]
+        
+        # 重叠行列 (Overlap matrix) 計算：|<psi_i, psi_j>|
+        overlaps = torch.abs(psis @ psis.conj().T)  # [S, S]
+        
+        # 対角成分（自分自身）を除外して最小値を設定
+        mask = torch.ones_like(overlaps, dtype=torch.bool)
+        mask.fill_diagonal_(False)
+        overlaps.masked_fill_(~mask, 0.0)
+        
+        # 最も近いペアを選択 (overlap が大きい = 距離が小さい)
+        max_val = overlaps.max()
+        idx_flat = torch.argmax(overlaps.reshape(-1))
+        
+        if max_val == 0.0:
+            # 類似度が 0 の場合、単純に先頭 2 つを処理対象とする
+            i, j = 0, 1
+        else:
+            # unravel_index の互換性対応 (PyTorch 2.0 未満対策)
+            try:
+                i, j = torch.unravel_index(idx_flat, overlaps.shape)
+            except AttributeError:
+                # PyTorch < 2.0 fallback
+                i = idx_flat // overlaps.shape[1]
+                j = idx_flat % overlaps.shape[1]
+        
+        # 測地線中点に統合
+        cos_theta = max_val.clamp(0.0, 1.0 - 1e-6)
+        theta = torch.acos(cos_theta)
+        
+        # 係数計算：sin(0.5*theta) / sin(theta)
+        if theta < 1e-5:
+            coeff = 0.5
+        else:
+            coeff = torch.sin(0.5 * theta) / (torch.sin(theta) + 1e-8)
+        
+        psi_i = psis[i]
+        psi_j = psis[j]
+        
+        psi_new = normalize_state(coeff * psi_i + coeff * psi_j)
+        weight_new = self.short_term[i].weight + self.short_term[j].weight
+        
+        # 中期に追加
+        self.mid_term.append(HistoryEntry(
+            psi=psi_new, 
+            weight=weight_new, 
+            utility=0.0, 
+            age=0
+        ))
+        
+        # 短期から削除 (インデックスが大きい方から削除しないとズレる)
+        indices_to_remove = sorted([i, j], reverse=True)
+        for idx in indices_to_remove:
+            del self.short_term[idx]
+
+    def _compress_mid_to_long(self) -> None:
+        """
+        中期層で最も重みの大きいエントリを長期に移動する。
+        長期が溢れたら、最も重みの小さいものを削除する。
+        """
+        if not self.mid_term:
+            return
+            
+        # 重みでソートし、最大のものを特定
+        max_idx = max(range(len(self.mid_term)), 
+                      key=lambda k: self.mid_term[k].weight)
+        
+        entry_to_move = self.mid_term.pop(max_idx)
+        self.long_term.append(entry_to_move)
+        
+        # 長期が溢れたら整理
+        if len(self.long_term) > self.max_long:
+            # 重みが最小のものを削除
+            min_idx = min(range(len(self.long_term)), 
+                          key=lambda k: self.long_term[k].weight)
+            del self.long_term[min_idx]
+
+    def summarize(self, batch_size: int = 1, current_psi: Optional[Tensor] = None) -> Tensor:
+        """
+        現在の状態に関連する履歴を全層から検索し、重み付き平均を返す。
+        
+        Args:
+            batch_size: 出力のバッチサイズ
+            current_psi: 現在の状態 [B, D] または [D]（関連度計算に使用）
+            
+        Returns:
+            summarized_context: [B, D_h]
+        """
+        if not (self.short_term or self.mid_term or self.long_term):
+            return torch.zeros(batch_size, self.embedder.proj_re.out_features, device=self.device)
+
+        # 入力の正規化
+        if current_psi is not None:
+            if current_psi.dim() == 2:
+                psi_ref = current_psi[0]
+            else:
+                psi_ref = current_psi
+        else:
+            # current_psi が提供されない場合は、短期メモリの最新を使用
+            if self.short_term:
+                psi_ref = self.short_term[-1].psi
+            else:
+                psi_ref = None
+        
+        all_entries = []
+        all_weights = []
+        
+        # 全層を走査
+        for layer in [self.short_term, self.mid_term, self.long_term]:
+            for entry in layer:
+                if psi_ref is not None:
+                    # 現在の状態との関連度 (Relevance) 計算
+                    overlap = torch.abs(complex_inner(psi_ref, entry.psi))
+                    relevance = overlap ** 2
+                    
+                    # 関連度閾値フィルタ
+                    if relevance > 0.01:
+                        all_entries.append(entry.psi)
+                        all_weights.append(entry.weight * relevance.item())
+                else:
+                    # 関連度計算しない場合は全て使用
+                    all_entries.append(entry.psi)
+                    all_weights.append(entry.weight)
+        
+        if not all_entries:
+            return torch.zeros(batch_size, self.embedder.proj_re.out_features, device=self.device)
+        
+        psis = torch.stack(all_entries)  # [N, D]
+        weights = torch.tensor(all_weights, device=self.device, dtype=psis.dtype)
+        
+        # Softmax 正規化
+        weights_norm = torch.softmax(weights, dim=0)
+        
+        # 埋め込み変換
+        embs = self.embedder(psis)  # [N, D_h]
+        
+        # 重み付き和
+        context_vec = torch.sum(weights_norm.unsqueeze(-1) * embs, dim=0)  # [D_h]
+        
+        # バッチ次元に展開
+        return context_vec.unsqueeze(0).expand(batch_size, -1)
+
+    def decay(self, boundary_prob: float = 0.0) -> None:
+        """
+        全層の重みを減衰させる。
+        文境界確率が高い場合は追加で減衰させる。
+        """
+        self._step_counter += 1
+        
+        eta = 0.1
+        gamma = 0.99 - eta * boundary_prob
+        gamma = max(gamma, 0.5)  # 減衰率が極端にならないよう下限設定
+        
+        for layer in [self.short_term, self.mid_term, self.long_term]:
+            for entry in layer:
+                entry.age += 1
+                entry.weight *= gamma
+            
+            # 重みが閾値以下のエントリを削除
+            # ただし age < 10 のものは保護（下位互換性）
+            layer[:] = [e for e in layer if e.weight >= self.eps or e.age < 10]
+
+    def __len__(self) -> int:
+        return len(self.short_term) + len(self.mid_term) + len(self.long_term)
+
+    def get_stats(self) -> dict:
+        """統計情報の取得"""
+        return {
+            'short': len(self.short_term),
+            'mid': len(self.mid_term),
+            'long': len(self.long_term),
+            'total': len(self)
+        }
+
+
+# 下位互換性：既存の HistoryBuffer という名前でアクセス可能に
+HistoryBuffer = HierarchicalHistoryBuffer
