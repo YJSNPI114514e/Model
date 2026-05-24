@@ -265,15 +265,32 @@ def born_probs(self, psi: Tensor) -> Tensor:
 
 ### 6.2 言語モデリング損失
 
-**理論**: 交差エントロピー
-$$\mathcal{L}_{LM} = -\log p(y_{\text{true}}|\psi_T)$$
+**理論**: ボルン則に基づくクロスエントロピー
+
+確率計算（ボルン則）:
+$$p(k) = \frac{|\langle e_k|\psi_T\rangle|^2}{\sum_j |\langle e_j|\psi_T\rangle|^2}$$
+
+クロスエントロピー損失:
+$$\mathcal{L}_{LM} = -\log p(y_{\text{true}})$$
 
 **実装**: `grim/model.py::language_modeling_loss()`
 ```python
-def language_modeling_loss(self, psi_T, target_token_ids):
-    probs = self.generation.born_probs(psi_T)
-    log_probs = log(probs.clamp_min(1e-8))
-    return nll_loss(log_probs, target_token_ids)
+def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Tensor:
+    # トークン埋め込みとの内積の二乗（ボルン則）
+    token_embeddings = self.tokenizer.embeddings  # [V, D]
+    scores = torch.abs(token_embeddings @ psi_T.conj().T) ** 2  # [V, B]
+    
+    # 正規化して確率に変換
+    probs = scores / (scores.sum(dim=0, keepdim=True) + 1e-8)  # [V, B]
+    
+    # ターゲットトークンの確率を取得
+    B = psi_T.shape[0]
+    target_probs = probs[target_token_ids, torch.arange(B, device=psi_T.device)]
+    
+    # クロスエントロピー損失
+    loss = -torch.log(target_probs + 1e-8).mean()
+    
+    return loss
 ```
 
 ---
