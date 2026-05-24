@@ -257,56 +257,9 @@ def forward(self, psi, psi0, h_emb, t):
 
 ---
 
-## 5. Flow Matching（第 3.1 節）
+## 5. 観測と生成（第 2.4 節）
 
-### 5.1 測地線補間
-
-**理論**: 初期状態 $|\psi_0\rangle$ と目標状態 $|\psi_T\rangle$ の測地線
-$$|\psi_t\rangle = \frac{\sin((1-t)\theta)}{\sin\theta}|\psi_0\rangle + \frac{\sin(t\theta)}{\sin\theta}|\psi_T\rangle$$
-$$\theta = d_{FS}(|\psi_0\rangle, |\psi_T\rangle)$$
-
-**実装**: `grim/geometry.py::geodesic_interp()`
-```python
-def geodesic_interp(psi0, target, t):
-    theta = fs_angle(psi0, target)
-    c0 = sin((1-t)*theta) / sin(theta)
-    c1 = sin(t*theta) / sin(theta)
-    return normalize_state(c0*psi0 + c1*target)
-```
-
-### 5.2 目標速度場
-
-**理論**:
-$$v_{\text{target}} = \frac{d|\psi_t\rangle}{dt} = \frac{-\theta\cos((1-t)\theta)}{\sin\theta}|\psi_0\rangle + \frac{\theta\cos(t\theta)}{\sin\theta}|\psi_T\rangle$$
-
-**実装**: `grim/geometry.py::geodesic_velocity_target()`
-```python
-def geodesic_velocity_target(psi0, target, t, psi_t):
-    coef0 = -theta*cos((1-t)*theta)/sin(theta)
-    coef1 = theta*cos(t*theta)/sin(theta)
-    v = coef0*psi0 + coef1*target
-    return tangent_project(v, psi_t)
-```
-
-### 5.3 Flow Matching 損失
-
-**理論**:
-$$\mathcal{L}_{FM} = \mathbb{E}_{t,\psi_0,\psi_T}\left[\|v_\theta(\psi_t, t) - v_{\text{target}}\|^2_{FS}\right]$$
-
-**実装**: `grim/model.py::flow_matching_loss()`
-```python
-def flow_matching_loss(self, psi0, target_state, h_emb, t):
-    psi_t = geodesic_interp(psi0, target_state, t)
-    v_target = geodesic_velocity_target(psi0, target_state, t, psi_t)
-    v_pred = self.flow_field(psi_t, psi0, h_emb, t)
-    return mean(|v_pred - v_target|^2)
-```
-
----
-
-## 6. 観測と生成（第 2.4 節）
-
-### 6.1 ボルン則
+### 5.1 ボルン則
 
 **理論**: 確率
 $$p(k) = |\langle e_k|\psi_T\rangle|^2$$
@@ -320,7 +273,7 @@ def born_probs(self, psi: Tensor) -> Tensor:
     return scores / sum(scores)  # ソフトマックス正規化
 ```
 
-### 6.2 言語モデリング損失
+### 5.2 言語モデリング損失
 
 **理論**: ボルン則に基づくクロスエントロピー
 
@@ -352,9 +305,9 @@ def language_modeling_loss(self, psi_T: Tensor, target_token_ids: Tensor) -> Ten
 
 ---
 
-## 7. ODE 積分（第 2.3 節）
+## 6. ODE 積分（第 2.3 節）
 
-### 7.1 数値積分
+### 6.1 数値積分
 
 **理論**: 常微分方程式
 $$\frac{d|\psi\rangle}{dt} = v(|\psi\rangle, t), \quad t \in [0, 1]$$
@@ -372,9 +325,9 @@ def integrate_flow(flow_field, psi0, h_emb, method="dopri5", rtol=1e-4, atol=1e-
 
 ---
 
-## 8. メタ学習（第 3.3 節）
+## 7. メタ学習（第 3.3 節）
 
-### 8.1 メタパラメータ
+### 7.1 メタパラメータ
 
 **理論**: 損失重み
 $$\mathcal{L} = f_{\text{softplus}}(w_{\text{obs}}) \cdot \mathcal{L}_{\text{obs}}$$
@@ -388,7 +341,7 @@ class MetaParams(nn.Module):
         return {"obs_weight": softplus(self.obs_weight)}
 ```
 
-### 8.2 更新間隔
+### 7.2 更新間隔
 
 **理論**: K2 パラメータ（モデル本体）は毎ステップ更新、K3 パラメータ（メタ重み）は $k_3$ ステップ毎更新
 
@@ -401,9 +354,9 @@ do_meta = ((global_step + 1) % config.k3_interval == 0)
 
 ---
 
-## 9. 自然勾配（第 3.2 節）
+## 8. 自然勾配（第 3.2 節）
 
-### 9.1 KFAC 近似
+### 8.1 KFAC 近似
 
 **理論**: Fisher 情報行列の Kronecker 積近似
 $$F \approx Q \otimes G$$
@@ -420,9 +373,9 @@ def precondition(self, params):
 
 ---
 
-## 10. 訓練ループ
+## 9. 訓練ループ
 
-### 10.1 全体損失
+### 9.1 全体損失
 
 **理論**: 
 $$\mathcal{L}_{\text{total}} = f_{\text{softplus}}(w_{\text{obs}}) \cdot \mathcal{L}_{\text{obs}}$$
@@ -440,7 +393,7 @@ def forward_train_lm(self, context_ids, target_ids, mask, use_amp):
     return {"loss": L, "loss_obs": L_lm}
 ```
 
-### 10.2 評価指標
+### 9.2 評価指標
 
 **理論**: 
 - トークン精度: $\text{acc} = \frac{1}{N}\sum_i \mathbb{I}[\hat{y}_i = y_i]$
@@ -457,9 +410,9 @@ def evaluate_lm(model, loader, device):
 
 ---
 
-## 11. 生成アルゴリズム
+## 10. 生成アルゴリズム
 
-### 11.1 自己回帰生成
+### 10.1 自己回帰生成
 
 **理論**: 
 $$|\psi_T^{(t)}\rangle = \text{ODEIntegrate}(|\psi_0^{(t)}\rangle, h_{\text{emb}}^{(t)})$$
@@ -481,7 +434,7 @@ def generate(self, prompt_ids, max_new_tokens=64):
 
 ---
 
-## 12. ハイパーパラメータ
+## 11. ハイパーパラメータ
 
 **実装**: `grim/config.py::GRIMConfig`
 
@@ -499,7 +452,7 @@ def generate(self, prompt_ids, max_new_tokens=64):
 
 ---
 
-## 13. 理論と実装の対応表
+## 12. 理論と実装の対応表
 
 | 理論概念 | 数式 | 実装ファイル | クラス/関数 |
 |---------|------|-------------|------------|
@@ -520,7 +473,7 @@ def generate(self, prompt_ids, max_new_tokens=64):
 
 ---
 
-## 14. 変更履歴と検証ポイント
+## 13. 変更履歴と検証ポイント
 
 ### モデル更新時のチェックリスト
 
@@ -548,7 +501,7 @@ def generate(self, prompt_ids, max_new_tokens=64):
 
 ---
 
-## 15. インストールと使用方法
+## 14. インストールと使用方法
 
 ```bash
 # 開発モードインストール
