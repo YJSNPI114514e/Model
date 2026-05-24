@@ -209,7 +209,6 @@ class EnergyVectorField(nn.Module):
 
         # 3. Continuation potential (E_cont)
         history = self.history_getter()
-        entries = history._entries if history is not None else []
         entries = []
         if history is not None:
             if hasattr(history, 'short_term'):
