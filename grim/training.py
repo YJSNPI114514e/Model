@@ -160,7 +160,7 @@ def evaluate_lm(model: GRIM, loader: DataLoader, device: torch.device) -> tuple[
         # Restore training history
         model.history.clear()
         for e in saved_history:
-            model.history._entries.append(e)
+            model.history.short_term.append(e)
 
     acc = correct / max(total, 1)
     ppl = float(torch.exp(torch.tensor(total_nll / max(total, 1))))
