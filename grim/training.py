@@ -456,7 +456,7 @@ def train(
             path = ckpt_dir / "best.pt"
             payload: dict = {
                 "model": model.state_dict(),
-                "config": config,
+                "config": config,  # チェックポイントに設定を保存
                 "meta": model.meta.as_dict(),
                 "epoch": epoch,
                 "val_metric": metric,
@@ -477,9 +477,49 @@ def train(
 
 
 def load_checkpoint(model: GRIM, path: str | Path, device: torch.device | None = None) -> GRIM:
+    """チェックポイントからモデルをロード。
+    
+    チェックポイントに含まれる設定パラメータを自動的に検出し、
+    モデルの設定をそれに合わせて調整してから重みを読み込みます。
+    """
+    from grim.model import GRIM
+    from grim.config import GRIMConfig
+    
     device = device or next(model.parameters()).device
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model"])
-    model.to(device)
-    model.eval()
-    return model
+    
+    # チェックポイントに設定情報が含まれているか確認
+    if "config" in ckpt:
+        # チェックポイントから設定を読み取り、モデルを再構築
+        ckpt_config = ckpt["config"]
+        print(f"Loading checkpoint with config: D={ckpt_config.D}, D_h={ckpt_config.D_h}, flow_hidden={ckpt_config.flow_hidden}")
+        
+        # モデルを再構築（同じアーキテクチャを持つ新しいインスタンスを作成）
+        new_model = GRIM(ckpt_config)
+        new_model.to(device)
+        new_model.load_state_dict(ckpt["model"])
+        new_model.eval()
+        return new_model
+    else:
+        # 設定情報がない場合、既存のモデル構造で読み込みを試みる
+        # エラーが発生する可能性あり
+        try:
+            model.load_state_dict(ckpt["model"])
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                # サイズミマッチの場合、チェックポイントから次元を推測
+                state_dict = ckpt["model"]
+                
+                # tokenizer.emb_re の形状から D を推測
+                if "tokenizer.emb_re.weight" in state_dict:
+                    emb_shape = state_dict["tokenizer.emb_re.weight"].shape
+                    inferred_D = emb_shape[1]  # [V, D]
+                    inferred_D_h = state_dict.get("history_embedder.proj_re.weight", torch.zeros(1,1)).shape[1] // 4 if "history_embedder.proj_re.weight" in state_dict else inferred_D // 2
+                    
+                    print(f"Size mismatch detected. Inferring from checkpoint: D={inferred_D}, D_h≈{inferred_D_h}")
+                    print("To fix this properly, please create a GRIMConfig with matching parameters and rebuild the model.")
+                raise e
+        
+        model.to(device)
+        model.eval()
+        return model

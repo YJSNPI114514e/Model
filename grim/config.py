@@ -64,9 +64,9 @@ class GRIMConfig:
 
     def apply_fast_preset(self) -> "GRIMConfig":
         """速度優先: 小型モデル + 短い履歴（ODE は常に DOPRI5）"""
-        self.D = 128
-        self.D_h = 64
-        self.flow_hidden = 128
+        self.D = 256
+        self.D_h = 128
+        self.flow_hidden = 256
         self.flow_layers = 2
         # sekkeisyo VIOLATION 6: Euler solver is FORBIDDEN
         self.ode_solver = "dopri5"
