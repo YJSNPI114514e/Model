@@ -263,10 +263,11 @@ class HierarchicalHistoryBuffer:
             return torch.zeros(batch_size, self.embedder.proj_re.out_features, device=self.device)
         
         psis = torch.stack(all_entries)  # [N, D]
-        weights = torch.tensor(all_weights, device=self.device, dtype=torch.float32)  # float32 で softmax
+        weights = torch.tensor(all_weights, device=self.device, dtype=torch.float32)  # float32 で計算
         
-        # Softmax 正規化
-        weights_norm = torch.softmax(weights, dim=0)
+        # ボルン則による重み付け: w_j^norm = |⟨ψ_current|ψ_j⟩|^2 * w_j / Σ_k |⟨ψ_current|ψ_k⟩|^2 * w_k
+        # all_weights は既に relevance^2 * weight を含んでいるため、これで規格化
+        weights_norm = weights / (weights.sum() + 1e-8)
         
         # 埋め込み変換
         embs = self.embedder(psis)  # [N, D_h]

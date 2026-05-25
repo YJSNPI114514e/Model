@@ -200,10 +200,19 @@ class ComplexTokenizer(nn.Module):
         pos = torch.arange(L, device=device).view(1, L).expand(B, L)
         phi = self.phase(pos)
         
+        # ボルン則による重み計算: α_j = |⟨e_j|ψ_context⟩|^2 / Σ_k |⟨e_k|ψ_context⟩|^2
+        # scores = ⟨omega_attn|ψ_states⟩ の振幅を計算
         scores = torch.einsum('d,bld->bl', self.omega_attn, psi_states.real)
         if mask is not None:
             scores = scores.masked_fill(~mask, float("-inf"))
-        alpha = torch.softmax(scores, dim=-1)
+        
+        # 確率振幅の二乗（ボルン則）
+        amplitude_squared = torch.exp(scores)  # exp(scores) で正値化
+        if mask is not None:
+            amplitude_squared = amplitude_squared.masked_fill(~mask, 0.0)
+        
+        # 規格化: α_j = |amplitude_j|^2 / Σ_k |amplitude_k|^2
+        alpha = amplitude_squared / (amplitude_squared.sum(dim=-1, keepdim=True) + 1e-8)
 
         # 重ね合わせ：|ψ₀⟩ = Σ_j α_j e^{iφ_j} |ψ_j⟩
         psi_0 = torch.sum(
