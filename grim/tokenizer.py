@@ -32,14 +32,16 @@ class ComplexTokenizer(nn.Module):
         w_alpha: float = 1.0,
     ) -> None:
         super().__init__()
+        assert dim >= vocab_size, f"dim ({dim}) must be >= vocab_size ({vocab_size}) for orthonormal embeddings"
         self.vocab_size = vocab_size
         self.dim = dim
         self.max_len = max_len
         self.w_alpha = w_alpha
 
-        # トークン埋め込み
-        self.emb_re = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
-        self.emb_im = nn.Parameter(torch.randn(vocab_size, dim) / math.sqrt(dim))
+        # Stiefel多様体上の埋め込み：Cayley変換によるユニタリ行列生成用
+        # D×D の歪エルミート行列のパラメータ (A† = -A)
+        self.raw_skew_re = nn.Parameter(torch.randn(dim, dim) * 0.01)
+        self.raw_skew_im = nn.Parameter(torch.randn(dim, dim) * 0.01)
 
         # 位相パラメータ
         self.w_phi = nn.Parameter(torch.tensor(1.0))
@@ -96,7 +98,40 @@ class ComplexTokenizer(nn.Module):
 
     @property
     def embeddings(self) -> Tensor:
-        return torch.complex(self.emb_re, self.emb_im)
+        """Cayley 変換でユニタリ行列を生成し、最初の V 列を返す。
+        U = (I - A)(I + A)^{-1}  where A = raw_skew_re + i*raw_skew_im, A† = -A
+        E = U[:, :V]   （最初の V 列）
+        
+        Returns:
+            [V, D] の正規直交埋め込み行列
+        """
+        D = self.dim
+        # 歪エルミート行列 A を構築：A† = -A
+        # A_re は歪対称 (A_re^T = -A_re)、A_im は対称 (A_im^T = A_im)
+        A_re = self.raw_skew_re - self.raw_skew_re.T  # 歪対称
+        A_im = self.raw_skew_im + self.raw_skew_im.T  # 対称
+        A = torch.complex(A_re, A_im)  # A† = -A を満たす
+
+        I = torch.eye(D, device=A.device, dtype=A.dtype)
+        # Cayley 変換：U = (I - A)(I + A)^{-1}
+        # torch.linalg.solve(I + A, I - A) は (I + A)^{-1} @ (I - A) を計算
+        # ユニタリ性：U† @ U = I
+        U = torch.linalg.solve(I + A, I - A)  # 数値的に安定
+        
+        # 最初の V 列を取得して転置 [D, V] -> [V, D]
+        return U[:, :self.vocab_size].T  # [V, D]
+
+    def check_orthonormality(self) -> float:
+        """埋め込みの正規直交性を検証（デバッグ用）。
+        
+        Returns:
+            グラム行列の非対角成分の最大値（小さいほど直交性が高い）
+        """
+        E = self.embeddings  # [V, D]
+        gram = E @ E.conj().T  # [V, V] - E E† = I_V を確認
+        off_diag = gram - torch.eye(self.vocab_size, device=E.device, dtype=E.dtype)
+        max_off = torch.abs(off_diag).max().item()
+        return max_off
 
     def phase(self, positions: Tensor) -> Tensor:
         """φ_j = w_φ · j / M_max + b_φ"""
