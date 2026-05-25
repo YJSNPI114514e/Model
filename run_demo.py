@@ -25,11 +25,20 @@ from grim.model import GRIM
 def main() -> None:
     corpus = TextCorpus(ROOT / "data" / "sample_corpus.txt")
     config = GRIMConfig(task_mode="lm", V=max(corpus.vocab.size, 64), device="cpu")
-    config.apply_fast_preset()
+    # より小さな設定でメモリ節約
+    config.D = 64
+    config.D_h = 32
+    config.flow_hidden = 64
+    config.flow_layers = 1
+    config.N_max = 24
+    config.seq_len = 16
+    config.M_max = 16
+    config.batch_size = 4
+    config.use_natural_grad = False
     train_loader, _, _ = get_lm_loaders(corpus, seq_len=config.seq_len, batch_size=config.batch_size)
     model = GRIM(config)
 
-    x, y = next(iter(train_loader))
+    x, y, is_doc_start = next(iter(train_loader))
     out = model.forward_train_lm(x, y)
     assert check_unitarity(out["psi0"])
     assert check_unitarity(out["psi_T"])

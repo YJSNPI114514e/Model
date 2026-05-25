@@ -23,10 +23,13 @@ class GRIMConfig:
 
     flow_hidden: int = 256
     flow_layers: int = 3
-    ode_solver: str = "dopri5"          # MUST be dopri5, Euler is FORBIDDEN
-    ode_method: str = "dopri5"
-    ode_rtol: float = 1e-4              # sekkeisyo: rtol=1e-4
-    ode_atol: float = 1e-6              # sekkeisyo: atol=1e-6
+    num_flow_steps: int = 8  # Residual Flow の段数（K）。大きいほど精密、小さいほど高速
+
+    # 非推奨：ODE ソルバー関連パラメータ（互換性のため残存）
+    ode_solver: str = "dopri5"          # deprecated
+    ode_method: str = "dopri5"          # deprecated
+    ode_rtol: float = 1e-4              # deprecated
+    ode_atol: float = 1e-6              # deprecated
 
     # 学習
     lr: float = 0.002

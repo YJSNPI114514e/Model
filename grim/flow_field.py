@@ -247,7 +247,7 @@ class EnergyVectorField(nn.Module):
         psi: Tensor,
         psi0: Tensor,
         h_emb: Tensor,  # kept for signature compatibility
-        t: Tensor,      # kept for signature compatibility
+        t: Tensor | None = None,      # kept for signature compatibility (now optional)
     ) -> Tensor:
         """
         修正版：解析的勾配を使用してベクトル場を計算。
