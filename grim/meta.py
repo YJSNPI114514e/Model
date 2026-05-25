@@ -52,8 +52,14 @@ class MetaParams(nn.Module):
             self.fm_weight, self.obs_weight, self.meta_lambda,
             self.meta_mu, self.meta_sigma, self.meta_beta,
         ])
-        w_pos = torch.softmax(w, dim=0)
-        hist = torch.softmax(self.w_hist, dim=0).clamp_min(1e-8)
+        # softplus で正値制約のみを課し、確率化はしない（分配としての重み）
+        w_pos = F.softplus(w)
+        w_pos = w_pos / (w_pos.sum() + 1e-8)  # 規格化（確率ではなく比率）
+        
+        hist = F.softplus(self.w_hist)
+        hist = hist / (hist.sum() + 1e-8)  # 規格化
+        hist = hist.clamp_min(1e-8)
+        
         return torch.sum(w_pos * (torch.log(w_pos.clamp_min(1e-8)) - torch.log(hist)))
 
     def compute_meta_loss(self, obs_loss: Tensor) -> Tensor:
