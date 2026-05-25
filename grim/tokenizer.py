@@ -1,4 +1,9 @@
-"""複素 RKHS トークナイザー（第 2.2 節）。状態空間モデル (SSM) 版。"""
+"""複素 RKHS トークナイザー（第 2.2 節）。状態空間モデル (SSM) 版。
+
+注意：Stiefel 多様体による正規直交化は不要になった。
+期待値埋め込みによるソフトな状態更新により、埋め込みの幾何学的偏りが
+状態に直接影響しなくなるため、単純なランダム初期化で十分。
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,9 @@ class ComplexTokenizer(nn.Module):
     改良 2: 固有分解による高速化
     Â_j = exp(X_base + gate * delta) の計算を O(D³)→O(D²) に削減。
     初期化時に固有分解し、毎ステップは対角行列の指数関数計算のみ。
+    
+    重要：Stiefel 多様体による正規直交化は廃止。
+    埋め込みはランダム初期化のまま学習させる。
     """
 
     def __init__(
@@ -32,16 +40,15 @@ class ComplexTokenizer(nn.Module):
         w_alpha: float = 1.0,
     ) -> None:
         super().__init__()
-        assert dim >= vocab_size, f"dim ({dim}) must be >= vocab_size ({vocab_size}) for orthonormal embeddings"
+        # Stiefel 多様体の制約を削除：dim >= vocab_size は不要
         self.vocab_size = vocab_size
         self.dim = dim
         self.max_len = max_len
         self.w_alpha = w_alpha
 
-        # Stiefel多様体上の埋め込み：Cayley変換によるユニタリ行列生成用
-        # D×D の歪エルミート行列のパラメータ (A† = -A)
-        self.raw_skew_re = nn.Parameter(torch.randn(dim, dim) * 0.01)
-        self.raw_skew_im = nn.Parameter(torch.randn(dim, dim) * 0.01)
+        # シンプルな埋め込み：Cayley 変換による正規直交化は不要
+        # ランダム初期化された埋め込みをそのまま使用
+        self.embeddings_raw = nn.Parameter(torch.randn(vocab_size, dim, dtype=torch.cfloat) / math.sqrt(dim))
 
         # 位相パラメータ
         self.w_phi = nn.Parameter(torch.tensor(1.0))
@@ -98,45 +105,15 @@ class ComplexTokenizer(nn.Module):
 
     @property
     def embeddings(self) -> Tensor:
-        """Cayley 変換でユニタリ行列を生成し、最初の V 列を返す。
-        U = (I - A)(I + A)^{-1}  where A = raw_skew_re + i*raw_skew_im, A† = -A
-        E = U[:, :V]   （最初の V 列）
+        """シンプルな埋め込みを返す。
+        
+        Stiefel 多様体による正規直交化は不要。
+        埋め込みは自由に学習される。
         
         Returns:
-            [V, D] の正規直交埋め込み行列
+            [V, D] の埋め込み行列
         """
-        D = self.dim
-        # 歪エルミート行列 A を構築：A† = -A
-        # A_re は歪対称 (A_re^T = -A_re)、A_im は対称 (A_im^T = A_im)
-        A_re = self.raw_skew_re - self.raw_skew_re.T  # 歪対称
-        A_im = self.raw_skew_im + self.raw_skew_im.T  # 対称
-        A = torch.complex(A_re, A_im)  # A† = -A を満たす
-
-        I = torch.eye(D, device=A.device, dtype=A.dtype)
-        # Cayley 変換：U = (I - A)(I + A)^{-1}
-        # torch.linalg.solve(I + A, I - A) は (I + A)^{-1} @ (I - A) を計算
-        # ユニタリ性：U† @ U = I
-        U = torch.linalg.solve(I + A, I - A)  # 数値的に安定
-        
-        # 最初の V 列を取得して転置 [D, V] -> [V, D]
-        return U[:, :self.vocab_size].T  # [V, D]
-
-    def check_orthonormality(self) -> float:
-        """埋め込みの正規直交性を検証（デバッグ用）。
-        
-        Returns:
-            グラム行列の非対角成分の最大値（小さいほど直交性が高い）
-        """
-        E = self.embeddings  # [V, D]
-        gram = E @ E.conj().T  # [V, V] - E E† = I_V を確認
-        off_diag = gram - torch.eye(self.vocab_size, device=E.device, dtype=E.dtype)
-        max_off = torch.abs(off_diag).max().item()
-        return max_off
-
-    def phase(self, positions: Tensor) -> Tensor:
-        """φ_j = w_φ · j / M_max + b_φ"""
-        j = positions.to(dtype=self.w_phi.dtype, device=positions.device)
-        return self.w_phi * j / self.max_len + self.b_phi
+        return self.embeddings_raw  # [V, D]
 
     def token_states(self, token_ids: Tensor) -> Tensor:
         """|e_t⟩ for each token [B, L, D]"""
@@ -235,7 +212,7 @@ class ComplexTokenizer(nn.Module):
         pos = torch.arange(L, device=device).view(1, L).expand(B, L)
         phi = self.phase(pos)
         
-        # ボルン則による重み計算: α_j = |⟨e_j|ψ_context⟩|^2 / Σ_k |⟨e_k|ψ_context⟩|^2
+        # ボルン則による重み計算：α_j = |⟨e_j|ψ_context⟩|^2 / Σ_k |⟨e_k|ψ_context⟩|^2
         # scores = ⟨omega_attn|ψ_states⟩ の振幅を計算
         scores = torch.einsum('d,bld->bl', self.omega_attn, psi_states.real)
         if mask is not None:
@@ -246,7 +223,7 @@ class ComplexTokenizer(nn.Module):
         if mask is not None:
             amplitude_squared = amplitude_squared.masked_fill(~mask, 0.0)
         
-        # 規格化: α_j = |amplitude_j|^2 / Σ_k |amplitude_k|^2
+        # 規格化：α_j = |amplitude_j|^2 / Σ_k |amplitude_k|^2
         alpha = amplitude_squared / (amplitude_squared.sum(dim=-1, keepdim=True) + 1e-8)
 
         # 重ね合わせ：|ψ₀⟩ = Σ_j α_j e^{iφ_j} |ψ_j⟩
@@ -257,8 +234,13 @@ class ComplexTokenizer(nn.Module):
 
         return normalize_state(psi_0)
 
+    def phase(self, positions: Tensor) -> Tensor:
+        """φ_j = w_φ · j / M_max + b_φ"""
+        j = positions.to(dtype=self.w_phi.dtype, device=positions.device)
+        return self.w_phi * j / self.max_len + self.b_phi
+
     def inject(self, psi: Tensor, token_id: Tensor) -> Tensor:
-        """生成時：新トークンを状態に重ねる簡易注入"""
+        """生成時：新トークンを状態に重ねる簡易注入（旧方式、現在は不使用）"""
         if token_id.dim() == 0:
             token_id = token_id.view(1)
         emb = self.embeddings[token_id]

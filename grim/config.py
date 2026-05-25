@@ -58,6 +58,7 @@ class GRIMConfig:
     top_k: int = 40
     repetition_penalty: float = 1.25
     use_sliding_context: bool = True
+    expected_mix_coeff: float = 0.1  # 期待値埋め込みの混合係数（逐次 Born 観測の代替）
 
     device: str = "cpu"
 

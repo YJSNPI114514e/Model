@@ -259,7 +259,11 @@ class GRIM(nn.Module):
         use_sliding_context: bool | None = None,
         greedy: bool = False,
     ) -> list[int]:
-        """GRIM_generate（第4.3節）+ サンプリングで繰り返し抑制"""
+        """GRIM_generate（第 4.3 節）+ サンプリングで繰り返し抑制
+        
+        改良：逐次 Born 観測を停止し、期待値埋め込みで状態をソフトに更新。
+        これにより「同じ単語のループ」と「漢字偏り」を大幅に改善。
+        """
         cfg = self.config
         if local_history_max is None:
             local_history_max = min(24, cfg.N_max)
@@ -268,6 +272,7 @@ class GRIM(nn.Module):
         repetition_penalty = cfg.repetition_penalty if repetition_penalty is None else repetition_penalty
         use_sliding_context = cfg.use_sliding_context if use_sliding_context is None else use_sliding_context
 
+        mix_coeff = cfg.expected_mix_coeff
         device = self.device
         context: list[int] = prompt_ids.view(-1).tolist()
         local_hist: list[Tensor] = []
@@ -316,9 +321,19 @@ class GRIM(nn.Module):
             if step + 1 >= min_new_tokens and next_id == cfg.eos_id:
                 break
 
+            # 改良：期待値埋め込みによる状態更新（逐次 Born 観測の代替）
+            # トークン ID のサンプリングは「出力用」としてのみ使用し、状態更新には使わない
             if not use_sliding_context:
-                s = self.tokenizer.inject(s_T, torch.tensor(next_id, device=device))
-            local_hist.append(s_T.squeeze(0))
+                probs = self.generation.born_probs(s_T)  # [1, V] 確率分布
+                # 複素埋め込みと float 確率の乗算：実部と虚部に分けて計算
+                emb = self.tokenizer.embeddings  # [V, D] complex
+                expected_emb_real = probs @ emb.real  # [1, D]
+                expected_emb_imag = probs @ emb.imag  # [1, D]
+                expected_emb = torch.complex(expected_emb_real, expected_emb_imag)  # [1, D] complex
+                expected_emb = normalize_state(expected_emb)  # 正規化
+                s = normalize_state(s_T + mix_coeff * expected_emb)  # 微小混合（上書きしない）
+            
+            local_hist.append(s_T.squeeze(0))  # 履歴には生の状態を保存
 
         return generated
 
