@@ -18,7 +18,6 @@ from grim.geometry import (
 from grim.history import HistoryBuffer, HistoryEmbedder
 from grim.meta import MetaParams
 from grim.observation import GenerationHead, ObservationBasis
-from grim.ode_solver import integrate_flow
 from grim.tokenizer import ComplexTokenizer
 
 
@@ -135,29 +134,36 @@ class GRIM(nn.Module):
         probs = self.observation.born_probs(psi_T)
         return F.nll_loss(torch.log(probs.clamp_min(1e-8)), labels)
 
-    def integrate(self, psi0: Tensor, h_emb: Tensor, use_amp: bool = False) -> Tensor:
+    def integrate(self, psi0: Tensor, h_emb: Tensor, num_steps: int | None = None) -> Tensor:
         """
-        sekkeisyo COMPONENT 3 / VIOLATION 6:
-        DOPRI5 のみ使用。Euler フォールバック禁止。
+        Residual Flow: K 段オイラー法（接空間射影済み）
         
-        use_amp: True で混合精度計算（GPU 時のみ有効）
+        d|ψ⟩/dt = v を固定ステップで離散化：
+        ψ_{k+1} = normalize(ψ_k + dt * v(ψ_k))
+        
+        Args:
+            psi0: 初期状態 (B, D)
+            h_emb: 履歴埋め込み (B, D_h)
+            num_steps: 積分ステップ数（K）。None の場合は config.num_flow_steps を使用。
+            
+        Returns:
+            psi_T: 終端状態 (B, D)
         """
-        return integrate_flow(
-            self.flow_field,
-            psi0,
-            h_emb,
-            method=self.config.ode_method,
-            rtol=self.config.ode_rtol,
-            atol=self.config.ode_atol,
-            use_amp=use_amp,
-        )
+        if num_steps is None:
+            num_steps = self.config.num_flow_steps
+        
+        psi = psi0
+        dt = 1.0 / num_steps
+        for _ in range(num_steps):
+            v = self.flow_field(psi, psi0, h_emb)
+            psi = normalize_state(psi + dt * v)
+        return psi
 
     def forward_train(
         self,
         token_ids: Tensor,
         labels: Tensor,
         mask: Tensor | None = None,
-        use_amp: bool = False,
     ) -> dict[str, Tensor]:
         B = token_ids.shape[0]
         psi0 = self.tokenize(token_ids, mask)
@@ -166,7 +172,7 @@ class GRIM(nn.Module):
 
         target = self.observation.target_state(labels)
         L_fm = torch.tensor(0.0, device=self.device)
-        psi_T = self.integrate(psi0, h_emb, use_amp=use_amp)
+        psi_T = self.integrate(psi0, h_emb)
         L_obs = self.observation_loss(psi_T, labels)
 
         # L_fm を捨てて L_obs のみで学習する
@@ -186,7 +192,6 @@ class GRIM(nn.Module):
         context_ids: Tensor,
         target_ids: Tensor,
         mask: Tensor | None = None,
-        use_amp: bool = False,
     ) -> dict[str, Tensor]:
         """自然言語: 文脈 → 次トークン（Flow Matching + 語彙上の観測損失）。"""
         B = context_ids.shape[0]
@@ -195,7 +200,7 @@ class GRIM(nn.Module):
         t = torch.rand(B, device=self.device)
 
         L_fm = torch.tensor(0.0, device=self.device)
-        psi_T = self.integrate(psi0, h_emb, use_amp=use_amp)
+        psi_T = self.integrate(psi0, h_emb)
         L_lm = self.language_modeling_loss(psi_T, target_ids)
 
         # L_fm を捨てて L_obs のみで学習する
@@ -224,7 +229,7 @@ class GRIM(nn.Module):
     def predict_next_token(self, context_ids: Tensor, mask: Tensor | None = None) -> Tensor:
         psi0 = self.tokenize(context_ids, mask)
         h_emb = self.summarize_history(context_ids.shape[0])
-        psi_T = self.integrate(psi0, h_emb, use_amp=False)
+        psi_T = self.integrate(psi0, h_emb)
         return self.generation.predict_token(psi_T)
 
     @torch.no_grad()
@@ -233,7 +238,7 @@ class GRIM(nn.Module):
         B = token_ids.shape[0]
         psi0 = self.tokenize(token_ids, mask)
         h_emb = self.summarize_history(B)
-        psi_T = self.integrate(psi0, h_emb, use_amp=False)
+        psi_T = self.integrate(psi0, h_emb)
         probs = self.observation.born_probs(psi_T)
         pred = probs.argmax(dim=-1)
         conf = self.observation.confidence(probs)
@@ -298,7 +303,7 @@ class GRIM(nn.Module):
                     s = self.tokenize(prompt_ids.view(1, -1))
                 psi0 = s
 
-            s_T = self.integrate(psi0, h_emb(), use_amp=False)
+            s_T = self.integrate(psi0, h_emb())
             recent = context[-8:] + generated[-8:]
 
             if greedy:
