@@ -71,8 +71,14 @@ class GenerationHead(nn.Module):
         self.tokenizer = tokenizer
 
     def _normalized_embeddings(self) -> Tensor:
-        """全トークン埋め込みを単位ノルムに正規化。FM target と同じ空間。"""
-        return normalize_state(self.tokenizer.embeddings)  # [V, D] complex, norm=1
+        """全トークン埋め込みを単位ノルムに正規化。FM target と同じ空間。
+        
+        重要：Cayley 変換により埋め込みは既に正規直交（ノルム 1）なので、
+        この関数は恒等写像になるが、API の一貫性のため残す。
+        """
+        emb = self.tokenizer.embeddings  # [V, D] - 既に正規直交
+        # normalize_state は念のため（実際には不要）
+        return normalize_state(emb)  # [V, D] complex, norm=1
 
     def token_scores(self, psi: Tensor) -> Tensor:
         """

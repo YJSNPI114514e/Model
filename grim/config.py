@@ -9,7 +9,7 @@ class GRIMConfig:
     task_mode: str = "lm"
 
     # 状態空間
-    D: int = 512
+    D: int = 1024
     V: int = 256
     K: int = 10
     M_max: int = 128
@@ -63,7 +63,7 @@ class GRIMConfig:
 
     def apply_fast_preset(self) -> "GRIMConfig":
         """速度優先: 小型モデル + 短い履歴（ODE は常に DOPRI5）"""
-        self.D = 256
+        self.D = 1024
         self.D_h = 128
         self.flow_hidden = 256
         self.flow_layers = 2
