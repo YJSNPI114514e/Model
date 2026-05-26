@@ -1,4 +1,4 @@
-```
+```python
 # Compiled Python files
 *.pyc
 __pycache__/
@@ -6,38 +6,33 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
-.env
-.env.local
-*.env.*
+env/
+
+# Python cache
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
 
 # Logs
 *.log
 
-# Editor/IDE files
-.vscode/
-.idea/
+# Environment files
+.env
+.env.local
+*.env.*
+
+# Temporary files
+*.tmp
 *.swp
 *.swo
-*.tmp
 
-# Coverage reports
-coverage/
-htmlcov/
-.coverage
+# OS specific
+.DS_Store
+Thumbs.db
 
-# Build artifacts
-dist/
-build/
-target/
-*.out
-*.exe
-*.dll
-*.so
-*.a
-
-# Package managers
-node_modules/
-.mypy_cache/
-.pytest_cache/
-.gradle/
+# Editors
+.vscode/
+.idea/
 ```

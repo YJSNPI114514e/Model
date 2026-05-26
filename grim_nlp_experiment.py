@@ -31,43 +31,83 @@ print(f"Using device: {device}")
 
 
 class Tokenizer(nn.Module):
+    """
+    初期状態 |ψ_0⟩ を構築するトークナイザー
+    |ψ_0⟩ = Σ_j α_j e^{iφ_j} |e_{t_j}⟩ （標準基底を使用）
+    """
     def __init__(self, vocab_size: int = 100):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, D)
+        self.vocab_size = vocab_size
+        # q はアテンション重み計算用に学習可能にしておく
         self.q = nn.Parameter(torch.randn(D))
         
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = token_ids.shape
-        emb = self.embedding(token_ids)
-        q_expanded = self.q.unsqueeze(0).unsqueeze(0)
-        scores = (q_expanded * emb).sum(dim=-1) / np.sqrt(D)
-        alpha = F.softmax(scores, dim=-1)
-        positions = torch.arange(1, seq_len + 1, device=emb.device).float()
+        
+        # アテンション重みの計算（q は使うが、embedding は使わない）
+        # トークン ID から位置ごとに重みを計算
+        q_expanded = self.q.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
+        
+        # 各トークンの標準基底ベクトルを取得（token_id % D 番目の次元が 1）
+        # One-hot ベクトルを作成
+        token_indices = token_ids % D  # [batch, seq_len]
+        one_hot = F.one_hot(token_indices, num_classes=D).float()  # [batch, seq_len, D]
+        
+        # アテンションスコア：各位置 j に対して q・e_{t_j} を計算
+        scores = (q_expanded * one_hot).sum(dim=-1) / np.sqrt(D)  # [batch, seq_len]
+        alpha = F.softmax(scores, dim=-1)  # [batch, seq_len]
+        
+        # 位相因子
+        positions = torch.arange(1, seq_len + 1, device=token_ids.device).float()
         phi = OMEGA * (positions / L)
-        phase_real = torch.cos(phi).unsqueeze(0)
-        phase_imag = torch.sin(phi).unsqueeze(0)
-        psi_0_real = ((alpha * phase_real).unsqueeze(-1) * emb).sum(dim=1)
-        psi_0_imag = ((alpha * phase_imag).unsqueeze(-1) * emb).sum(dim=1)
+        phase_real = torch.cos(phi)  # [seq_len]
+        phase_imag = torch.sin(phi)  # [seq_len]
+        
+        # |ψ_0⟩ = Σ_j α_j e^{iφ_j} |e_{t_j}⟩
+        # 実部と虚部を分开して計算
+        psi_0_real = torch.zeros(batch_size, D, device=token_ids.device)
+        psi_0_imag = torch.zeros(batch_size, D, device=token_ids.device)
+        
+        for j in range(seq_len):
+            psi_0_real += alpha[:, j:j+1] * phase_real[j:j+1] * one_hot[:, j, :]
+            psi_0_imag += alpha[:, j:j+1] * phase_imag[j:j+1] * one_hot[:, j, :]
+        
         psi_0 = torch.complex(psi_0_real, psi_0_imag)
+        
+        # 正規化
         norm = torch.norm(psi_0, dim=-1, keepdim=True)
         psi_0 = psi_0 / (norm + EPS)
+        
         return psi_0
 
 
-def vector_field(psi, psi_0):
-    inner = torch.sum(psi_0.conj() * psi, dim=-1, keepdim=True)
+def vector_field(psi, psi_target):
+    """
+    勾配フロー：ψ を ψ_target に向けて進化させる
+    E(ψ) = -log(|⟨ψ|ψ_target⟩|²)
+    ∇E = (⟨ψ_target|ψ⟩ / |⟨ψ_target|ψ⟩|²) |ψ_target⟩
+    接空間射影：v_⊥ = v - ⟨ψ|v⟩ψ
+    """
+    # ⟨ψ_target|ψ⟩
+    inner = torch.sum(psi_target.conj() * psi, dim=-1, keepdim=True)
     denom = torch.abs(inner)**2 + EPS
-    v = (inner / denom) * psi_0
+    # v = (⟨ψ_target|ψ⟩ / |⟨ψ_target|ψ⟩|²) ψ_target
+    v = (inner / denom) * psi_target
+    # 接空間への射影
     proj_coeff = torch.sum(psi.conj() * v, dim=-1, keepdim=True)
     v_perp = v - proj_coeff * psi
     return v_perp
 
 
-def euler_integrate(psi_0, steps=ODE_STEPS):
+def euler_integrate(psi_0, psi_target, steps=ODE_STEPS):
+    """
+    ODE 積分：dψ/dt = v_⊥(ψ), ψ(0) = ψ_0
+    ψ_target は ψ_0 とは異なる状態
+    """
     psi = psi_0.clone()
     dt = 1.0 / steps
     for _ in range(steps):
-        v = vector_field(psi, psi_0)
+        v = vector_field(psi, psi_target)
         psi = psi + dt * v
     norm = torch.norm(psi, dim=-1, keepdim=True)
     psi = psi / (norm + EPS)
@@ -119,9 +159,30 @@ class GRIMNLP(nn.Module):
         super().__init__()
         self.tokenizer = Tokenizer(vocab_size)
         self.observer = Observer(use_b)
+        # 入力ごとに異なるターゲット状態を生成するためのネットワーク
+        # ψ_target = f(ψ_0) として、ψ_0 に依存したターゲットを生成
+        self.target_net = nn.Sequential(
+            nn.Linear(2*D, D * 2),  # 入力は実部 + 虚部で 2D
+            nn.ReLU(),
+            nn.Linear(D * 2, D),
+        )
+        
+    def generate_target(self, psi_0):
+        """ψ_0 からターゲット状態を生成（複素数対応）"""
+        # 実部と虚部を分开して処理
+        psi_0_real = torch.cat([psi_0.real, psi_0.imag], dim=-1)  # [batch, 2D]
+        target_real = self.target_net(psi_0_real)  # [batch, D]
+        # 正規化
+        target_norm = torch.norm(target_real, dim=-1, keepdim=True) + EPS
+        psi_target = target_real / target_norm  # 実数のみ
+        # 複素数に変換（虚部は 0）
+        psi_target = torch.complex(psi_target, torch.zeros_like(psi_target))
+        return psi_target
         
     def ode_step(self, psi_0):
-        psi_T, num_steps = euler_integrate(psi_0)
+        # ψ_0 に依存したターゲット状態を生成
+        psi_target = self.generate_target(psi_0)
+        psi_T, num_steps = euler_integrate(psi_0, psi_target)
         return psi_T, num_steps
     
     def forward(self, token_ids):
